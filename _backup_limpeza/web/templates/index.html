@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JARVIS Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <h1>JARVIS Dashboard</h1>
+        <p class="version">v3.1.0</p>
+    </header>
+
+    <main>
+        <section class="card status-card">
+            <h2>Status do Sistema</h2>
+            <ul>
+                <li><strong>Nome:</strong> {{ status.name }}</li>
+                <li><strong>Estado:</strong> {{ "Online" if status.running else "Offline" }}</li>
+                <li><strong>Uptime:</strong> {{ status.uptime }}</li>
+                <li><strong>Mensagens no contexto:</strong> {{ status.context_size }}</li>
+            </ul>
+            {% if status.modules %}
+            <h3>Módulos</h3>
+            <ul class="modules">
+                {% for name, mod_status in status.modules.items() %}
+                <li>{{ mod_status }} {{ name }}</li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+        </section>
+
+        <section class="card history-card">
+            <h2>Histórico Recente</h2>
+            {% if messages %}
+            <ul class="history">
+                {% for m in messages %}
+                <li class="msg msg-{{ m.role }}">
+                    <span class="role">{{ m.role }}</span>
+                    <span class="content">{{ m.content }}</span>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p>Nenhuma mensagem no contexto.</p>
+            {% endif %}
+        </section>
+    </main>
+
+    <footer>
+        <p>JARVIS - Just A Rather Very Intelligent System</p>
+    </footer>
+</body>
+</html>

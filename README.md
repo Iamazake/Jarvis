@@ -1,0 +1,188 @@
+# 🤖 JARVIS - WhatsApp AI Assistant
+
+Assistente virtual inteligente para WhatsApp com arquitetura híbrida **Node.js + Python**.
+
+## 🏗️ Arquitetura
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        JARVIS v2.0                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌─────────────────┐     ┌─────────────────┐     ┌────────────┐ │
+│  │   WhatsApp      │     │   JARVIS API    │     │  Python    │ │
+│  │   (Baileys)     │────▶│   (Fastify)     │────▶│  AI Engine │ │
+│  │   Port: 3001    │     │   Port: 5000    │     │            │ │
+│  └─────────────────┘     └─────────────────┘     └────────────┘ │
+│         │                        │                      │        │
+│         │                        │                      ▼        │
+│         ▼                        ▼               ┌────────────┐ │
+│   ┌──────────┐            ┌──────────┐          │   FAISS    │ │
+│   │ QR Code  │            │  SQLite  │          │   Cache    │ │
+│   │ Terminal │            │   DB     │          │ Semântico  │ │
+│   └──────────┘            └──────────┘          └────────────┘ │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## ✨ Características
+
+- **🔌 Baileys**: Conexão WhatsApp estável (sem Chrome/Selenium)
+- **🧠 IA Avançada**: OpenAI GPT-4, Claude, Ollama
+- **⚡ Cache Semântico**: FAISS + embeddings para respostas instantâneas
+- **📊 Multi-Perfil**: Diferentes personalidades por contato
+- **🔄 Reconexão Automática**: Mantém a sessão ativa
+
+## 🚀 Como iniciar
+
+- **Windows:** execute `start.bat` e escolha a opção (1=CLI, 2=Voz, 3=WhatsApp, 4=Tudo).
+- **Linha de comando:** `python jarvis.py` (CLI) ou `python jarvis.py --mcp` (com ferramentas).
+- **Para enviar mensagem pelo WhatsApp:** o serviço WhatsApp precisa estar rodando antes (opção 3 ou 4 no `start.bat`, ou `cd services/whatsapp && node index.js`).
+
+Guia completo: **[COMO_INICIAR.md](COMO_INICIAR.md)**.
+
+**Dados e banco de dados:** os módulos novos (sentimento, produtividade, backup, segurança, tradução) **não usam banco de dados**; usam arquivos em `data/` ou memória. Ver [docs/DADOS_E_PERSISTENCIA.md](docs/DADOS_E_PERSISTENCIA.md).
+
+## 📁 Estrutura do Projeto
+
+```
+jarvis/
+├── start.sh              # 🚀 Script principal de inicialização
+├── whatsapp.sh           # 📱 Iniciar só WhatsApp
+├── main.py               # 🐍 Entry point Python (modo Selenium)
+├── process_message.py    # 🔧 Processador de mensagens (chamado pela API)
+│
+├── services/             # Node.js Services
+│   ├── whatsapp/         # Baileys WhatsApp Client
+│   │   ├── index.js
+│   │   └── package.json
+│   └── api/              # Fastify REST API
+│       ├── index.js
+│       └── package.json
+│
+├── src/                  # Python Modules (Design Patterns)
+│   ├── ai/               # AI Engine + Providers
+│   │   ├── engine.py     # (Facade Pattern)
+│   │   └── providers.py  # (Strategy Pattern)
+│   ├── cache/            # Semantic Cache
+│   │   └── semantic.py   # (Singleton + FAISS)
+│   ├── database/         # Data Layer
+│   │   └── repository.py # (Repository Pattern)
+│   └── whatsapp/         # Legacy Selenium Client
+│       ├── client.py
+│       └── handlers.py
+│
+├── config/               # Configurações
+│   └── settings.py
+│
+├── data/                 # Dados persistentes
+│   ├── jarvis.db         # SQLite Database
+│   └── faiss_cache/      # Cache embeddings
+│
+├── docs/                 # Documentação
+└── logs/                 # Logs do sistema
+```
+
+## 🚀 Instalação
+
+### 1. Dependências Python
+```bash
+cd jarvis
+pip install -r requirements.txt
+```
+
+### 2. Dependências Node.js
+```bash
+cd services/whatsapp && npm install
+cd ../api && npm install
+```
+
+### 3. Configurar API Keys
+```bash
+export OPENAI_API_KEY="sk-..."
+# ou crie um arquivo .env
+```
+
+## ▶️ Execução
+
+### Modo Recomendado (Node.js + Python)
+```bash
+./start.sh
+# Selecione opção 1 para iniciar todos os serviços
+```
+
+### Apenas WhatsApp
+```bash
+./whatsapp.sh
+# Escaneie o QR code que aparecerá no terminal
+```
+
+### Modo Python Legado (Selenium)
+```bash
+python3 main.py
+```
+
+## 📡 API Endpoints
+
+### WhatsApp Service (Port 3001)
+| Método | Endpoint | Descrição |
+|--------|----------|-----------|
+| GET | `/status` | Status da conexão |
+| POST | `/send` | Enviar mensagem |
+
+### JARVIS API (Port 5000)
+| Método | Endpoint | Descrição |
+|--------|----------|-----------|
+| GET | `/health` | Health check |
+| GET | `/stats` | Estatísticas |
+| POST | `/webhook` | Receber mensagens do WhatsApp |
+| POST | `/process` | Processar mensagem via IA |
+| POST | `/send` | Enviar via WhatsApp (proxy) |
+
+## 🔧 Configuração
+
+### Variáveis de Ambiente
+```env
+# IA
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-...
+OLLAMA_URL=http://localhost:11434
+
+# Database
+DATABASE_URL=sqlite:///data/jarvis.db
+
+# Serviços
+WHATSAPP_PORT=3001
+API_PORT=5000
+```
+
+## 🛠️ Tecnologias
+
+- **Node.js 18+**: Baileys, Fastify
+- **Python 3.10+**: OpenAI, FAISS, sentence-transformers
+- **SQLite**: Armazenamento de mensagens
+- **FAISS**: Cache semântico de alta performance
+
+## 📝 Design Patterns Utilizados
+
+- **Facade**: AI Engine simplifica providers
+- **Strategy**: Múltiplos providers de IA
+- **Singleton**: Cache semântico compartilhado
+- **Repository**: Abstração de banco de dados
+- **Observer**: Event handlers para mensagens
+
+## 🤝 Contribuindo
+
+1. Fork o projeto
+2. Crie sua branch (`git checkout -b feature/nova-feature`)
+3. Commit suas mudanças (`git commit -m 'Add nova feature'`)
+4. Push para a branch (`git push origin feature/nova-feature`)
+5. Abra um Pull Request
+
+## 📄 Licença
+
+MIT License - veja [LICENSE](LICENSE) para detalhes.
+
+---
+
+**JARVIS** - *Just A Rather Very Intelligent System* 🤖

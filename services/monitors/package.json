@@ -1,0 +1,14 @@
+{
+  "name": "jarvis-monitors",
+  "version": "1.0.0",
+  "description": "JARVIS Monitors Service - Escuta eventos e dispara alertas",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "fastify": "^4.24.0"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "jarvis-scheduler",
+  "version": "1.0.0",
+  "description": "JARVIS Scheduler Service - Agendamentos e Lembretes",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "fastify": "^4.24.0",
+    "node-cron": "^3.0.3"
+  }
+}

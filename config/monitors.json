@@ -1,0 +1,45 @@
+{
+  "notifier": "5511988669454@s.whatsapp.net",
+  "keywords": {
+    "enabled": true,
+    "words": [
+      "trabalho",
+      "grana",
+      "emprestou",
+      "emprestimo",
+      "dinheiro",
+      "urgente",
+      "emergencia",
+      "projeto",
+      "reuniao",
+      "prazo",
+      "deadline"
+    ],
+    "case_sensitive": false,
+    "whole_word": true
+  },
+  "contacts": {
+    "enabled": true,
+    "jids": [
+      "11988669454@s.whatsapp.net",
+      "5511989001833@s.whatsapp.net",
+      "5511988669454@s.whatsapp.net"
+    ],
+    "notify_on_message": true,
+    "notify_on_online": true
+  },
+  "media": {
+    "enabled": true,
+    "contacts": null,
+    "save_path": "data/media",
+    "notify_on_media": true,
+    "save_media": true
+  },
+  "presence": {
+    "enabled": true,
+    "contacts": null,
+    "notify_on_online": false,
+    "notify_on_offline": false,
+    "cooldown_seconds": 300
+  }
+}

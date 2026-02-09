@@ -1,0 +1,89 @@
+{
+  "version": "3.0.0",
+  "name": "JARVIS",
+  
+  "ai": {
+    "provider": "openai",
+    "model": "gpt-4-turbo",
+    "fallback_model": "gpt-4o-mini",
+    "temperature": 0.7,
+    "max_tokens": 2048
+  },
+  
+  "cache": {
+    "enabled": true,
+    "threshold": 0.92,
+    "max_entries": 1000
+  },
+  
+  "voice": {
+    "enabled": true,
+    "engine": "pyttsx3",
+    "whisper_model": "base",
+    "elevenlabs": {
+      "voice_id": "21m00Tcm4TlvDq8ikWAM",
+      "model_id": "eleven_multilingual_v2"
+    },
+    "wake_words": ["jarvis", "ei jarvis", "oi jarvis"],
+    "language": "pt-BR",
+    "rate": 180,
+    "volume": 1.0
+  },
+  
+  "search": {
+    "default_engine": "duckduckgo",
+    "max_results": 5,
+    "engines": {
+      "duckduckgo": { "enabled": true },
+      "tavily": { "enabled": true },
+      "brave": { "enabled": false }
+    }
+  },
+  
+  "tools": {
+    "shell": {
+      "enabled": true,
+      "timeout": 60,
+      "dangerous_commands": ["rm -rf", "del /f", "format", "shutdown"]
+    },
+    "apps": {
+      "chrome": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "vscode": "C:\\Users\\%USERNAME%\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe",
+      "notepad": "notepad.exe",
+      "explorer": "explorer.exe",
+      "calc": "calc.exe"
+    },
+    "file_manager": {
+      "allowed_paths": ["C:\\YAmazake", "C:\\Users"],
+      "blocked_extensions": [".exe", ".bat", ".cmd", ".ps1"]
+    }
+  },
+  
+  "whatsapp": {
+    "enabled": true,
+    "port": 3001,
+    "auto_reply": true,
+    "monitored_contacts": [],
+    "priority_contacts": [],
+    "profiles": {}
+  },
+  
+  "autonomy": {
+    "level": "medium",
+    "proactive_suggestions": true,
+    "auto_routines": true,
+    "check_interval_minutes": 30
+  },
+  
+  "notifications": {
+    "sound": true,
+    "desktop": true
+  },
+  
+  "logging": {
+    "level": "INFO",
+    "file": "logs/jarvis.log",
+    "max_size_mb": 10,
+    "backup_count": 5
+  }
+}

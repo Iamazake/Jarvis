@@ -1,0 +1,110 @@
+# JARVIS WhatsApp UC - Docker Compose
+# Chrome indetectável + Redis para cache assíncrono
+#
+# Uso:
+#   docker-compose up --build
+#
+# Primeiro uso:
+#   1. docker-compose up
+#   2. Acesse http://localhost:5900 (VNC) para ver o QR Code
+#   3. Escaneie com seu celular
+#   4. Pronto! Sessão salva automaticamente
+
+version: '3.8'
+
+services:
+  # ===== JARVIS WhatsApp Bot =====
+  jarvis:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jarvis-whatsapp
+    restart: unless-stopped
+    environment:
+      - DISPLAY=:99
+      - AI_PROVIDER=${AI_PROVIDER:-openai}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OLLAMA_HOST=http://ollama:11434
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      # Sessão do WhatsApp persistente
+      - ./data/wa_profile:/app/data/wa_profile
+      # Índice FAISS persistente
+      - ./data:/app/data
+      # Logs
+      - ./logs:/app/logs
+      # Config
+      - ./config_whatsapp_ai.json:/app/config_whatsapp_ai.json:ro
+    depends_on:
+      - redis
+    networks:
+      - jarvis-net
+    # Shared memory para Chrome
+    shm_size: '2gb'
+    # Opcional: VNC para ver o navegador
+    ports:
+      - "5900:5900"  # VNC
+
+  # ===== Redis para Cache Assíncrono =====
+  redis:
+    image: redis:7-alpine
+    container_name: jarvis-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    networks:
+      - jarvis-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===== Ollama Local (opcional) =====
+  # Descomente se quiser IA local
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: jarvis-ollama
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+  #   networks:
+  #     - jarvis-net
+  #   # GPU support (NVIDIA)
+  #   # deploy:
+  #   #   resources:
+  #   #     reservations:
+  #   #       devices:
+  #   #         - driver: nvidia
+  #   #           count: 1
+  #   #           capabilities: [gpu]
+
+  # ===== MySQL (opcional - se não usar SQLite) =====
+  # mysql:
+  #   image: mysql:8.0
+  #   container_name: jarvis-mysql
+  #   restart: unless-stopped
+  #   environment:
+  #     MYSQL_ROOT_PASSWORD: Jarvis2312
+  #     MYSQL_DATABASE: jarvis_db
+  #   volumes:
+  #     - mysql_data:/var/lib/mysql
+  #   networks:
+  #     - jarvis-net
+  #   healthcheck:
+  #     test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+
+networks:
+  jarvis-net:
+    driver: bridge
+
+volumes:
+  redis_data:
+  # ollama_data:
+  # mysql_data:

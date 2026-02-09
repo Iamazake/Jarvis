@@ -1,0 +1,73 @@
+# ==========================================
+# JARVIS - Arquivos Ignorados (SEGURANÇA)
+# ==========================================
+
+# === CREDENCIAIS E CHAVES (CRÍTICO) ===
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+secrets/
+credentials/
+
+# === SESSÕES DO WHATSAPP (CRÍTICO) ===
+auth_info/
+whatsapp_session/
+whatsapp_session_ai/
+*.session
+*.session.json
+
+# === BANCO DE DADOS LOCAL ===
+data/*.db
+data/*.sqlite
+*.sql
+*.dump
+
+# === LOGS (podem conter dados sensíveis) ===
+logs/
+*.log
+
+# === CACHE ===
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.pyc
+.cache/
+
+# === NODE.JS ===
+node_modules/
+npm-debug.log
+yarn-error.log
+package-lock.json
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# === SISTEMA ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === BUILDS ===
+dist/
+build/
+*.egg-info/
+
+# === ARQUIVOS TEMPORÁRIOS ===
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+
+# === FAISS/EMBEDDINGS (grandes) ===
+*.faiss
+*.index
+embeddings/
+models/

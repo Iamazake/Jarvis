@@ -1,0 +1,29 @@
+{
+  "notifier": "5511985751247@s.whatsapp.net",
+  "keywords": {
+    "enabled": false,
+    "words": [],
+    "ignoreGroups": true
+  },
+  "contacts": {
+    "enabled": false,
+    "vipContacts": [],
+    "notifyOnMessage": true,
+    "notifyOnOnline": false
+  },
+  "media": {
+    "enabled": false,
+    "saveImages": true,
+    "saveVideos": false,
+    "saveAudios": false
+  },
+  "presence": {
+    "enabled": false,
+    "trackContacts": []
+  },
+  "antiSpam": {
+    "enabled": false,
+    "maxMessagesPerMinute": 10,
+    "blockDuration": 60
+  }
+}

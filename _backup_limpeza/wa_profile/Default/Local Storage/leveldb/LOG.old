@@ -1,0 +1,6 @@
+2026/02/04-12:47:19.707 134f9f Reusing MANIFEST /Users/sarah/YAmazake/jarvis/data/wa_profile/Default/Local Storage/leveldb/MANIFEST-000001
+2026/02/04-12:47:19.786 134f9f Recovering log #8
+2026/02/04-12:47:19.790 134f9f Reusing old log /Users/sarah/YAmazake/jarvis/data/wa_profile/Default/Local Storage/leveldb/000008.log 
+2026/02/04-13:09:16.895 134fa1 Level-0 table #11: started
+2026/02/04-13:09:16.927 134fa1 Level-0 table #11: 16038 bytes OK
+2026/02/04-13:09:16.981 134fa1 Delete type=0 #8

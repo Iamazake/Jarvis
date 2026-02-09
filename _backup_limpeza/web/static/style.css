@@ -1,0 +1,66 @@
+/* JARVIS Dashboard - Estilo mínimo */
+:root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --user: #3fb950;
+    --assistant: #58a6ff;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 1rem;
+    line-height: 1.5;
+}
+
+header {
+    margin-bottom: 1.5rem;
+    border-bottom: 1px solid var(--muted);
+    padding-bottom: 0.5rem;
+}
+
+header h1 { margin: 0; font-size: 1.5rem; }
+.version { color: var(--muted); font-size: 0.875rem; }
+
+main {
+    display: grid;
+    gap: 1rem;
+    max-width: 900px;
+    margin: 0 auto;
+}
+
+.card {
+    background: var(--card);
+    border: 1px solid var(--muted);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+}
+
+.card h2 { margin-top: 0; font-size: 1.1rem; }
+.card h3 { font-size: 0.95rem; color: var(--muted); margin: 0.75rem 0 0.25rem; }
+
+ul { padding-left: 1.25rem; }
+.modules { list-style: none; padding-left: 0; }
+.modules li { padding: 0.2rem 0; }
+
+.history { list-style: none; padding-left: 0; max-height: 400px; overflow-y: auto; }
+.msg { padding: 0.5rem 0; border-bottom: 1px solid var(--muted); }
+.msg:last-child { border-bottom: none; }
+.msg .role { font-size: 0.75rem; color: var(--muted); margin-right: 0.5rem; }
+.msg-user .role { color: var(--user); }
+.msg-assistant .role { color: var(--assistant); }
+.msg .content { word-break: break-word; }
+
+footer {
+    margin-top: 2rem;
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.875rem;
+}
