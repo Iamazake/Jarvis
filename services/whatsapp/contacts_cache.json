@@ -7,20 +7,20 @@
     "manual": true
   },
   "status@broadcast": {
-    "pushName": "Alex Remo PJ",
+    "pushName": ".",
     "jid": "status@broadcast",
-    "lastSeen": 1770739190367
+    "lastSeen": 1770742586515
   },
   "5511991550813": {
     "name": "ALEXANDRE YAMAÇAKE",
     "pushName": "ALEXANDRE YAMAÇAKE",
     "jid": "5511991550813@s.whatsapp.net",
-    "lastSeen": 1770736063665
+    "lastSeen": 1770742101096
   },
   "5511997947727": {
     "pushName": "André Luiz Duran",
     "jid": "5511997947727@s.whatsapp.net",
-    "lastSeen": 1770310765600,
+    "lastSeen": 1770754771417,
     "name": "André Luiz Duran"
   },
   "11991978535": {
@@ -31,21 +31,21 @@
     "manual": true
   },
   "120363403986980636": {
-    "pushName": "Gava",
+    "pushName": "Pedro",
     "jid": "120363403986980636@g.us",
-    "lastSeen": 1770736077529
+    "lastSeen": 1770754766751
   },
   "33122938835074": {
     "name": "André Luiz Duran",
     "pushName": "André Luiz Duran",
     "jid": "33122938835074@s.whatsapp.net",
-    "lastSeen": 1770653042792
+    "lastSeen": 1770754762604
   },
   "71464027979985": {
     "name": "Juliano Ferreira",
     "pushName": "Juliano Ferreira",
     "jid": "71464027979985@s.whatsapp.net",
-    "lastSeen": 1770653042792
+    "lastSeen": 1770754762604
   },
   "5511970984218": {
     "name": "🤍",
@@ -57,13 +57,13 @@
     "name": "Cheirinhos Da Lê",
     "pushName": "Cheirinhos Da Lê",
     "jid": "5511993555022@s.whatsapp.net",
-    "lastSeen": 1770736063665
+    "lastSeen": 1770754762604
   },
   "221289633554538": {
     "name": "Dhyellen",
     "pushName": "Dhyellen",
     "jid": "221289633554538@s.whatsapp.net",
-    "lastSeen": 1770739217534
+    "lastSeen": 1770755448043
   },
   "5511996951071": {
     "name": "Roberto",
@@ -99,7 +99,7 @@
     "name": "La Casa Del Sushi",
     "pushName": "La Casa Del Sushi",
     "jid": "5511982514458@s.whatsapp.net",
-    "lastSeen": 1770675652051
+    "lastSeen": 1770754762604
   },
   "258669052694617": {
     "name": "<Saulo>{ FullStack }",
@@ -117,7 +117,7 @@
     "name": "Adônis Maia",
     "pushName": "Adônis Maia",
     "jid": "5511986739636@s.whatsapp.net",
-    "lastSeen": 1770736063665
+    "lastSeen": 1770754762604
   },
   "261997501358328": {
     "name": "Zedeck",
@@ -147,7 +147,7 @@
     "name": "Sarah",
     "pushName": "Sarah",
     "jid": "107932662403293@s.whatsapp.net",
-    "lastSeen": 1770739374954
+    "lastSeen": 1770754762604
   },
   "5511993390256": {
     "name": "💚🐷🤍🎸",
@@ -177,7 +177,7 @@
     "name": ".",
     "pushName": ".",
     "jid": "554899288723@s.whatsapp.net",
-    "lastSeen": 1770737142444
+    "lastSeen": 1770754762604
   },
   "113392002031624": {
     "name": "☆M.Zampronio☆",
@@ -213,7 +213,7 @@
     "name": "Douglas Moretti",
     "pushName": "Douglas Moretti",
     "jid": "5511989001833@s.whatsapp.net",
-    "lastSeen": 1770681230698
+    "lastSeen": 1770754762605
   },
   "5511942407713": {
     "name": "𝐀𝐥𝐞𝐱 𝐂𝐨𝐫𝐭𝐞𝐳",
@@ -243,7 +243,7 @@
     "name": "Pedro",
     "pushName": "Pedro",
     "jid": "256254979108964@s.whatsapp.net",
-    "lastSeen": 1770662812140
+    "lastSeen": 1770754775470
   },
   "276875117121673": {
     "name": "Renan Darienzo",
@@ -355,7 +355,7 @@
   "120363047968173475": {
     "pushName": "Dhyellen",
     "jid": "120363047968173475@g.us",
-    "lastSeen": 1770332313722
+    "lastSeen": 1770755410609
   },
   "255589393387580": {
     "name": "Ricardo 79",
@@ -833,5 +833,23 @@
     "pushName": "Alex Remo PJ",
     "jid": "47910829961324@s.whatsapp.net",
     "lastSeen": 1770739190369
+  },
+  "159884620374156": {
+    "name": "Eduardo Freitas",
+    "pushName": "Eduardo Freitas",
+    "jid": "159884620374156@s.whatsapp.net",
+    "lastSeen": 1770741703260
+  },
+  "558194608222": {
+    "name": "Dinho",
+    "pushName": "Dinho",
+    "jid": "558194608222@s.whatsapp.net",
+    "lastSeen": 1770742264353
+  },
+  "5511988600112": {
+    "name": ".",
+    "pushName": ".",
+    "jid": "5511988600112@s.whatsapp.net",
+    "lastSeen": 1770742586518
   }
 }

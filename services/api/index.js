@@ -64,6 +64,42 @@ const state = {
   }
 };
 
+const WEBHOOK_PROCESS_TIMEOUT_MS = Number(process.env.WEBHOOK_PROCESS_TIMEOUT_MS || 22000);
+const WEBHOOK_IDEMPOTENCY_TTL_MS = Number(process.env.WEBHOOK_IDEMPOTENCY_TTL_MS || 300000);
+const WEBHOOK_IDEMPOTENCY_MAX = Number(process.env.WEBHOOK_IDEMPOTENCY_MAX || 1000);
+const webhookResultCache = new Map();
+const webhookInFlight = new Set();
+
+// ================================
+// Fila + Worker (ACK burro, dedupe apenas)
+// ================================
+const API_QUEUE_ENABLED = ['1', 'true', 'yes'].includes(String(process.env.API_QUEUE_ENABLED || '1').trim().toLowerCase());
+const API_QUEUE_MAX_SIZE = Math.max(1, Number(process.env.API_QUEUE_MAX_SIZE || 1000));
+const API_QUEUE_DEDUPE_TTL_MS = Number(process.env.API_QUEUE_DEDUPE_TTL_MS || 600000); // 10 min
+const API_QUEUE_CONCURRENCY = Math.max(1, Number(process.env.API_QUEUE_CONCURRENCY || 3));
+const API_WHATSAPP_SERVICE_URL = (process.env.API_WHATSAPP_SERVICE_URL || 'http://127.0.0.1:3001').replace(/\/$/, '');
+const WHATSAPP_SEND_TIMEOUT_MS = Number(process.env.WHATSAPP_SEND_TIMEOUT_MS || 8000);
+
+const jobQueue = [];
+const seenMessageIds = new Map(); // message_id -> timestamp (para dedupe do ACK)
+const queueInFlightMessageIds = new Set(); // worker já pegou o job
+let queueActiveGlobal = 0;
+const queueActiveByJid = new Set();
+
+function extractTimingLines(stderrText = '') {
+  return String(stderrText)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('[timing]'));
+}
+
+function tailText(text = '', limit = 500) {
+  const content = String(text || '').trim();
+  if (!content) return '';
+  if (content.length <= limit) return content;
+  return content.slice(-limit);
+}
+
 // ================================
 // Funções Utilitárias
 // ================================
@@ -72,7 +108,7 @@ const state = {
  * Executa comando Python para processar mensagem via JARVIS (run_jarvis_message.py).
  * Usa JID (from_jid) para decisão de autopilot; display_name só para exibição.
  */
-async function processPythonAI(message, jid, displayName) {
+async function processPythonAI(message, jid, displayName, timeoutMs = WEBHOOK_PROCESS_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     const pythonScript = join(rootDir, 'run_jarvis_message.py');
     const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
@@ -90,6 +126,16 @@ async function processPythonAI(message, jid, displayName) {
 
     let stdout = '';
     let stderr = '';
+    let done = false;
+
+    const timeout = setTimeout(() => {
+      if (done) return;
+      done = true;
+      try { python.kill(); } catch {}
+      const timing = extractTimingLines(stderr).slice(-6).join(' | ');
+      const suffix = timing ? ` | timing=${timing}` : '';
+      reject(new Error(`Python timeout após ${timeoutMs}ms${suffix}`));
+    }, timeoutMs);
 
     python.stdout.on('data', (data) => {
       stdout += data.toString();
@@ -100,23 +146,82 @@ async function processPythonAI(message, jid, displayName) {
     });
 
     python.on('close', (code) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timeout);
+      const timing = extractTimingLines(stderr);
       if (code === 0) {
         try {
           const result = JSON.parse(stdout.trim());
-          resolve(result);
+          resolve({ ...result, __timing: timing });
         } catch (e) {
           // Se não for JSON, retorna como texto
-          resolve({ response: stdout.trim(), cached: false });
+          resolve({ response: stdout.trim(), cached: false, __timing: timing });
         }
       } else {
-        reject(new Error(stderr || `Python exited with code ${code}`));
+        reject(new Error(tailText(stderr) || `Python exited with code ${code}`));
       }
     });
 
     python.on('error', (err) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timeout);
       reject(err);
     });
   });
+}
+
+function cleanupWebhookCache(now = Date.now()) {
+  for (const [key, entry] of webhookResultCache.entries()) {
+    if ((now - entry.createdAt) > WEBHOOK_IDEMPOTENCY_TTL_MS) {
+      webhookResultCache.delete(key);
+    }
+  }
+  while (webhookResultCache.size > WEBHOOK_IDEMPOTENCY_MAX) {
+    const oldestKey = webhookResultCache.keys().next().value;
+    if (!oldestKey) break;
+    webhookResultCache.delete(oldestKey);
+  }
+}
+
+function cleanupSeenMessageIds(now = Date.now()) {
+  for (const [key, ts] of seenMessageIds.entries()) {
+    if ((now - ts) > API_QUEUE_DEDUPE_TTL_MS) {
+      seenMessageIds.delete(key);
+    }
+  }
+}
+
+function isConnectionError(err) {
+  const code = err?.code || '';
+  const message = String(err?.message || '').toLowerCase();
+  return ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET'].includes(code) || message.includes('econnrefused') || message.includes('enotfound') || message.includes('eai_again');
+}
+
+async function sendToWhatsApp(jid, message) {
+  const url = `${API_WHATSAPP_SERVICE_URL}/send`;
+  const timeoutMs = WHATSAPP_SEND_TIMEOUT_MS;
+  const body = JSON.stringify({ to: jid, message });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`HTTP ${res.status} ${text.slice(0, 80)}`);
+    }
+    return { ok: true };
+  } catch (err) {
+    clearTimeout(timeoutId);
+    throw err;
+  }
 }
 
 /**
@@ -159,7 +264,11 @@ fastify.get('/stats', async (request, reply) => {
   return {
     ...state.stats,
     queueSize: state.messageQueue.length,
-    processing: state.processing
+    processing: state.processing,
+    jobQueueLength: jobQueue.length,
+    queueActiveGlobal,
+    queueInFlightCount: queueInFlightMessageIds.size,
+    apiQueueEnabled: API_QUEUE_ENABLED
   };
 });
 
@@ -167,31 +276,68 @@ fastify.get('/stats', async (request, reply) => {
  * Webhook - Recebe mensagens do WhatsApp (Baileys)
  */
 fastify.post('/webhook', async (request, reply) => {
-  const { sender, message, timestamp, pushName, from_jid, display_name } = request.body;
+  const { sender, message, timestamp, pushName, from_jid, display_name, message_id } = request.body;
   const jid = from_jid || sender;
   const displayName = display_name || pushName || '';
+  const messageId = message_id || '';
 
   if (!message || !jid) {
     return reply.status(400).send({ error: 'sender/from_jid e message são obrigatórios' });
   }
 
+  cleanupWebhookCache();
+  if (messageId) {
+    const cached = webhookResultCache.get(messageId);
+    if (cached) {
+      fastify.log.info({ msg: 'Webhook duplicado (cache hit)', messageId, jid });
+      return cached.result;
+    }
+    if (webhookInFlight.has(messageId)) {
+      fastify.log.warn({ msg: 'Webhook duplicado (in-flight)', messageId, jid });
+      return {
+        success: true,
+        action: 'ignore',
+        response: '',
+        sender,
+        reason: 'duplicate_inflight'
+      };
+    }
+  }
+
   state.stats.received++;
-  
+  const startedAt = Date.now();
+
   fastify.log.info({
     msg: 'Mensagem recebida',
+    messageId: messageId || '(sem message_id)',
     jid,
     displayName: displayName || '(sem nome)',
     message: message.substring(0, 100)
   });
 
+  if (messageId) {
+    webhookInFlight.add(messageId);
+  }
+
   try {
+    fastify.log.info({ msg: 'ANTES processPythonAI', messageId: messageId || '(sem message_id)', jid });
     // Decisão reply/ignore só via Python (autopilot). Nunca usar quickResponse aqui:
     // senão responderíamos "Olá!" mesmo com autopilot desativado.
-    const result = await processPythonAI(message, jid, displayName);
+    const result = await processPythonAI(message, jid, displayName, WEBHOOK_PROCESS_TIMEOUT_MS);
+    const pythonTiming = Array.isArray(result?.__timing) ? result.__timing : [];
+    const elapsedMs = Date.now() - startedAt;
+    fastify.log.info({ msg: 'DEPOIS processPythonAI', messageId: messageId || '(sem message_id)', jid, elapsedMs });
+    if (pythonTiming.length > 0) {
+      fastify.log.info({
+        msg: 'Python timing',
+        messageId: messageId || '(sem message_id)',
+        steps: pythonTiming.slice(-10)
+      });
+    }
 
     state.stats.processed++;
 
-    return {
+    const payload = {
       success: true,
       action: result.action || 'reply',
       response: result.response ?? '',
@@ -199,21 +345,155 @@ fastify.post('/webhook', async (request, reply) => {
       sender,
       reason: result.reason
     };
+    if (messageId) {
+      webhookResultCache.set(messageId, { createdAt: Date.now(), result: payload });
+    }
+    return payload;
 
   } catch (error) {
     state.stats.errors++;
-    fastify.log.error({ msg: 'Erro ao processar', error: error.message });
+    fastify.log.error({ msg: 'Erro ao processar', messageId: messageId || '(sem message_id)', error: error.message });
 
     // Não enviar mensagem genérica (evita "Olá" ou greeting em caso de fetch/erro)
-    return {
+    const payload = {
       success: false,
       action: 'ignore',
       response: '',
-      reason: 'error',
+      reason: error.message?.includes('timeout') ? 'timeout' : 'error',
       error: error.message
     };
+    if (messageId) {
+      webhookResultCache.set(messageId, { createdAt: Date.now(), result: payload });
+    }
+    return payload;
+  } finally {
+    if (messageId) {
+      webhookInFlight.delete(messageId);
+    }
   }
 });
+
+/**
+ * POST /queue - Enfileirar mensagem (ACK burro: só dedupe, não consulta resultado).
+ * Worker processa em background e chama POST /send do WhatsApp.
+ */
+fastify.post('/queue', async (request, reply) => {
+  if (!API_QUEUE_ENABLED) {
+    return reply.status(404).send({ error: 'Queue disabled', success: false });
+  }
+  const { sender, message, timestamp, pushName, from_jid, display_name, message_id } = request.body || {};
+  const jid = (from_jid || sender || '').toString().trim();
+  const displayName = (display_name || pushName || '').toString().trim();
+  const msgId = (message_id || '').toString().trim();
+
+  if (!message || !jid) {
+    return reply.status(400).send({ error: 'message e jid (ou from_jid/sender) são obrigatórios', success: false });
+  }
+
+  cleanupSeenMessageIds();
+
+  if (msgId) {
+    if (queueInFlightMessageIds.has(msgId)) {
+      return { success: true, status: 'duplicate_inflight', message_id: msgId };
+    }
+    const seenAt = seenMessageIds.get(msgId);
+    if (seenAt != null && (Date.now() - seenAt) < API_QUEUE_DEDUPE_TTL_MS) {
+      return { success: true, status: 'duplicate_seen', message_id: msgId };
+    }
+  }
+
+  if (jobQueue.length >= API_QUEUE_MAX_SIZE) {
+    return reply.status(503).send({ success: false, status: 'queue_full', message_id: msgId || null });
+  }
+
+  const job = {
+    message_id: msgId,
+    jid,
+    displayName: displayName || jid,
+    message: String(message),
+    sender: (sender || jid).toString(),
+    timestamp: timestamp || Date.now(),
+    from_jid: jid,
+    pushName: displayName
+  };
+  jobQueue.push(job);
+  state.stats.received++;
+
+  setImmediate(() => pump());
+  return { success: true, status: 'enqueued', message_id: msgId || null };
+});
+
+function pump() {
+  if (!API_QUEUE_ENABLED || queueActiveGlobal >= API_QUEUE_CONCURRENCY || jobQueue.length === 0) return;
+  let idx = -1;
+  for (let i = 0; i < jobQueue.length; i++) {
+    if (!queueActiveByJid.has(jobQueue[i].jid)) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx === -1) return;
+  const job = jobQueue.splice(idx, 1)[0];
+  queueActiveGlobal++;
+  queueActiveByJid.add(job.jid);
+
+  processOneJob(job).finally(() => {
+    queueActiveGlobal--;
+    queueActiveByJid.delete(job.jid);
+    pump();
+  });
+}
+
+async function processOneJob(job) {
+  const { message_id: msgId, jid, displayName, message } = job;
+  const startAt = Date.now();
+  if (msgId) queueInFlightMessageIds.add(msgId);
+  fastify.log.info({ msg: 'queue job start', message_id: msgId || '(sem id)', jid });
+
+  try {
+    fastify.log.info({ msg: 'python_start', message_id: msgId || '(sem id)', jid });
+    const result = await processPythonAI(message, jid, displayName, WEBHOOK_PROCESS_TIMEOUT_MS);
+    const elapsedMs = Date.now() - startAt;
+    fastify.log.info({ msg: 'python_end', message_id: msgId || '(sem id)', jid, elapsedMs, reason: result?.reason });
+
+    state.stats.processed++;
+
+    if (result?.action === 'reply' && result?.response) {
+      fastify.log.info({ msg: 'send_start', message_id: msgId || '(sem id)', jid });
+      let lastErr;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          await sendToWhatsApp(jid, result.response);
+          fastify.log.info({ msg: 'send_end', message_id: msgId || '(sem id)', jid, elapsedMs: Date.now() - startAt });
+          break;
+        } catch (err) {
+          lastErr = err;
+          if (isConnectionError(err) && attempt < 2) {
+            await new Promise((r) => setTimeout(r, 300));
+            continue;
+          }
+          fastify.log.error({ msg: 'send_failed', message_id: msgId || '(sem id)', jid, error: err.message });
+          break;
+        }
+      }
+      if (lastErr && !isConnectionError(lastErr)) {
+        fastify.log.error({ msg: 'send_not_retried', message_id: msgId || '(sem id)', jid, error: lastErr.message });
+      }
+    } else {
+      fastify.log.info({ msg: 'queue job ignore', message_id: msgId || '(sem id)', jid, reason: result?.reason || 'no_response', elapsedMs: Date.now() - startAt });
+    }
+  } catch (err) {
+    state.stats.errors++;
+    const elapsedMs = Date.now() - startAt;
+    fastify.log.error({ msg: 'queue job error', message_id: msgId || '(sem id)', jid, error: err.message, elapsedMs });
+  } finally {
+    if (msgId) {
+      queueInFlightMessageIds.delete(msgId);
+      seenMessageIds.set(msgId, Date.now());
+    }
+    fastify.log.info({ msg: 'queue job done', message_id: msgId || '(sem id)', jid, elapsedMs: Date.now() - startAt });
+  }
+}
 
 /**
  * Processar mensagem diretamente (teste)
@@ -646,6 +926,9 @@ const start = async () => {
     console.log('║     GET  /health   - Health check         ║');
     console.log('║     GET  /stats    - Estatísticas         ║');
     console.log('║     POST /webhook  - Receber mensagens    ║');
+    if (API_QUEUE_ENABLED) {
+      console.log('║     POST /queue    - Enfileirar (ACK)     ║');
+    }
     console.log('║     POST /process  - Processar IA         ║');
     console.log('║     POST /send     - Enviar via WhatsApp  ║');
     console.log('║     POST /media    - Notificar mídia      ║');

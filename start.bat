@@ -29,6 +29,9 @@ if not exist "jarvis.py" (
     exit /b 1
 )
 
+REM Defaults de resiliencia para o WhatsApp Service
+if "%WA_WEBHOOK_TIMEOUT_MS%"=="" set "WA_WEBHOOK_TIMEOUT_MS=25000"
+
 REM Menu
 :menu
 echo.

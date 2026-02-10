@@ -24,14 +24,28 @@ const CONFIG = {
   apiPort: 3001,
   // URLs dos outros serviços
   services: {
-    api: 'http://localhost:5000',
-    scheduler: 'http://localhost:5002',
-    monitors: 'http://localhost:5003'
+    api: process.env.JARVIS_API_URL || 'http://127.0.0.1:5000',
+    scheduler: process.env.JARVIS_SCHEDULER_URL || 'http://127.0.0.1:5002',
+    monitors: process.env.JARVIS_MONITORS_URL || 'http://127.0.0.1:5003',
   },
   contactsFile: './contacts_cache.json',
   autoReply: true,  // MODO AUTÔNOMO ATIVADO
   ownerNumber: '5511988669454'  // Seu número (não responde a si mesmo)
 };
+
+function parsePositiveInt(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+const WEBHOOK_TIMEOUT_MS = parsePositiveInt(process.env.WA_WEBHOOK_TIMEOUT_MS, 8000);
+const NOTIFY_TIMEOUT_MS = parsePositiveInt(process.env.WA_NOTIFY_TIMEOUT_MS, 2500);
+const WEBHOOK_RETRY_DELAYS_MS = [300, 900];
+const WA_USE_QUEUE = ['1', 'true', 'yes'].includes(String(process.env.WA_USE_QUEUE || '1').trim().toLowerCase());
+const WA_QUEUE_TIMEOUT_MS = parsePositiveInt(process.env.WA_QUEUE_TIMEOUT_MS, 2000);
+const API_HEALTHCHECK_INTERVAL_MS = parsePositiveInt(process.env.WA_API_HEALTHCHECK_INTERVAL_MS, 15000);
+const API_HEALTHCHECK_TIMEOUT_MS = parsePositiveInt(process.env.WA_API_HEALTHCHECK_TIMEOUT_MS, 2500);
+const API_SHORT_CIRCUIT_MS = parsePositiveInt(process.env.WA_API_SHORT_CIRCUIT_MS, 20000);
 
 // Logger silencioso (erros de init queries são esperados)
 const logger = pino({ 
@@ -58,6 +72,13 @@ const recentMessageIds = [];
 
 // Cache de contatos do WhatsApp
 let contactsCache = {};
+const apiHealth = {
+  ok: true,
+  lastCheckAt: 0,
+  lastError: '',
+  consecutiveFailures: 0,
+  suppressUntil: 0
+};
 
 // ========================================
 // Gerenciamento de Contatos
@@ -230,9 +251,6 @@ async function connectWhatsApp() {
       saveContactsCache();
     });
 
-    // Concorrência limitada para processar mensagens (evita bloqueio e timeouts em cascata)
-    const MESSAGE_CONCURRENCY = 3;
-
     const processOneMessage = async (msg) => {
       if (msg.key.fromMe) return;
       const messageId = msg.key.id;
@@ -283,14 +301,24 @@ async function connectWhatsApp() {
         notifyService('api', '/media', payload);
       }
       if (!text) return;
+      if (!CONFIG.autoReply) return;
       try {
+        const apiAvailable = await ensureApiAvailable();
+        if (!apiAvailable) {
+          const waitSeconds = Math.max(0, Math.ceil((apiHealth.suppressUntil - Date.now()) / 1000));
+          const suffix = waitSeconds > 0 ? ` (retry em ~${waitSeconds}s)` : '';
+          console.log(`⏭️ ${pushName}: API indisponível${suffix}`);
+          return;
+        }
+
+        if (WA_USE_QUEUE) {
+          console.log(`🤖 Autopilot: enfileirando mensagem de ${pushName} → /queue`);
+          await callApiQueue(payload);
+          return;
+        }
+
         console.log(`🤖 Autopilot: processando mensagem de ${pushName} → Jarvis (reply/ignore)`);
-        const response = await fetch(`${CONFIG.services.api}/webhook`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-        const result = await response.json();
+        const result = await callApiWebhookWithRetry(payload);
         if (result.success && result.action !== 'ignore' && result.response) {
           await sendMessage(sender, result.response);
           console.log(`📤 Respondido: ${result.response.substring(0, 50)}...`);
@@ -401,17 +429,234 @@ function addContactToCache(number, name) {
 // Funções Utilitárias
 // ========================================
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function summarizeError(error) {
+  const parts = [];
+  if (error?.name) parts.push(`name=${error.name}`);
+  if (error?.message) parts.push(`message=${error.message}`);
+  if (error?.code) parts.push(`code=${error.code}`);
+  if (error?.cause?.code) parts.push(`cause_code=${error.cause.code}`);
+  if (error?.cause?.message) parts.push(`cause=${error.cause.message}`);
+  return parts.join(' | ') || 'erro desconhecido';
+}
+
+function markApiHealthy() {
+  apiHealth.ok = true;
+  apiHealth.lastError = '';
+  apiHealth.consecutiveFailures = 0;
+  apiHealth.suppressUntil = 0;
+}
+
+function markApiFailure(errorSummary) {
+  apiHealth.ok = false;
+  apiHealth.lastError = errorSummary;
+  apiHealth.consecutiveFailures += 1;
+  if (apiHealth.consecutiveFailures >= 2) {
+    apiHealth.suppressUntil = Date.now() + API_SHORT_CIRCUIT_MS;
+  }
+}
+
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const startedAt = Date.now();
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+    return {
+      response,
+      elapsedMs: Date.now() - startedAt
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function checkApiHealth(forceLog = false) {
+  const url = `${CONFIG.services.api}/health`;
+  apiHealth.lastCheckAt = Date.now();
+
+  try {
+    const { response, elapsedMs } = await fetchWithTimeout(
+      url,
+      { method: 'GET' },
+      API_HEALTHCHECK_TIMEOUT_MS
+    );
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const wasDown = !apiHealth.ok;
+    markApiHealthy();
+    if (forceLog || wasDown) {
+      console.log(`✅ API saudável (${elapsedMs}ms): ${url}`);
+    }
+    return true;
+  } catch (error) {
+    const summary = summarizeError(error);
+    markApiFailure(summary);
+    const suppressed = apiHealth.suppressUntil > Date.now();
+    if (forceLog || apiHealth.consecutiveFailures === 1) {
+      console.warn(`⚠️ API indisponível: ${url} | ${summary}${suppressed ? ` | short-circuit=${Math.ceil((apiHealth.suppressUntil - Date.now()) / 1000)}s` : ''}`);
+    }
+    return false;
+  }
+}
+
+async function ensureApiAvailable() {
+  if (Date.now() < apiHealth.suppressUntil) {
+    return false;
+  }
+
+  const stale = (Date.now() - apiHealth.lastCheckAt) > API_HEALTHCHECK_INTERVAL_MS;
+  if (stale || !apiHealth.ok) {
+    return checkApiHealth(false);
+  }
+
+  return true;
+}
+
+function startApiHealthMonitor() {
+  checkApiHealth(true).catch(() => {});
+  const timer = setInterval(() => {
+    checkApiHealth(false).catch(() => {});
+  }, API_HEALTHCHECK_INTERVAL_MS);
+  if (typeof timer.unref === 'function') {
+    timer.unref();
+  }
+}
+
+async function callApiQueue(payload) {
+  const url = `${CONFIG.services.api}/queue`;
+  const maxAttempts = 2;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const { response, elapsedMs } = await fetchWithTimeout(
+        url,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        },
+        WA_QUEUE_TIMEOUT_MS
+      );
+      const raw = await response.text();
+      let result = {};
+      if (raw) {
+        try {
+          result = JSON.parse(raw);
+        } catch (_) {
+          throw new Error(`Resposta inválida: ${raw.slice(0, 80)}`);
+        }
+      }
+      if (response.status === 503 && result.status === 'queue_full') {
+        if (attempt < maxAttempts) {
+          await sleep(300);
+          continue;
+        }
+        console.error(`❌ API /queue full (503) após ${attempt} tentativa(s)`);
+        return null;
+      }
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} ${raw.slice(0, 80)}`);
+      }
+      markApiHealthy();
+      const status = result.status || 'enqueued';
+      const mid = result.message_id || payload.message_id || '';
+      if (status === 'enqueued') {
+        console.log(`📥 enqueued message_id=${mid} jid=${payload.from_jid || payload.sender} tempo=${elapsedMs}ms`);
+      } else {
+        console.log(`📥 duplicate ${status} message_id=${mid}`);
+      }
+      return result;
+    } catch (error) {
+      const summary = summarizeError(error);
+      markApiFailure(summary);
+      console.error(`❌ API /queue falhou tentativa=${attempt}/${maxAttempts} url=${url} erro=${summary}`);
+      if (attempt < maxAttempts) {
+        await sleep(300);
+      } else {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+async function callApiWebhookWithRetry(payload) {
+  const url = `${CONFIG.services.api}/webhook`;
+  const maxAttempts = WEBHOOK_RETRY_DELAYS_MS.length + 1;
+  let lastSummary = 'erro desconhecido';
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const attemptStartedAt = Date.now();
+
+    try {
+      const { response, elapsedMs } = await fetchWithTimeout(
+        url,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        },
+        WEBHOOK_TIMEOUT_MS
+      );
+
+      const raw = await response.text();
+      let result = {};
+      if (raw) {
+        try {
+          result = JSON.parse(raw);
+        } catch (error) {
+          throw new Error(`Resposta inválida da API: ${raw.slice(0, 120)}`);
+        }
+      }
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} | body=${raw.slice(0, 120)}`);
+      }
+
+      markApiHealthy();
+      console.log(`🌐 API /webhook OK tentativa=${attempt}/${maxAttempts} tempo=${elapsedMs}ms`);
+      return result;
+    } catch (error) {
+      const errorSummary = summarizeError(error);
+      const totalMs = Date.now() - attemptStartedAt;
+      lastSummary = errorSummary;
+      markApiFailure(errorSummary);
+      console.error(`❌ API /webhook falhou tentativa=${attempt}/${maxAttempts} url=${url} tempo=${totalMs}ms erro=${errorSummary}`);
+
+      if (attempt < maxAttempts) {
+        await sleep(WEBHOOK_RETRY_DELAYS_MS[attempt - 1]);
+      }
+    }
+  }
+
+  throw new Error(`Falha ao chamar ${url} após ${maxAttempts} tentativas: ${lastSummary}`);
+}
+
 // Notificar outro serviço (fire and forget)
 async function notifyService(serviceName, endpoint, payload) {
   const url = CONFIG.services[serviceName];
   if (!url) return;
   
   try {
-    fetch(`${url}${endpoint}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    }).catch(() => {}); // Fire and forget
+    void fetchWithTimeout(
+      `${url}${endpoint}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      },
+      NOTIFY_TIMEOUT_MS
+    ).catch(() => {}); // Fire and forget
   } catch (err) {
     // Silencioso - não bloqueia o fluxo principal
   }
@@ -488,6 +733,10 @@ fastify.get('/status', async () => ({
   uptime: formatUptime(),
   autoReply: CONFIG.autoReply,
   contactsCount: Object.keys(contactsCache).length,
+  apiTarget: CONFIG.services.api,
+  apiHealthy: apiHealth.ok,
+  apiLastError: apiHealth.lastError || null,
+  apiSuppressSeconds: Math.max(0, Math.ceil((apiHealth.suppressUntil - Date.now()) / 1000)),
   timestamp: Date.now()
 }));
 
@@ -661,6 +910,9 @@ async function main() {
     console.error('❌ Erro ao iniciar API:', err.message);
     process.exit(1);
   }
+
+  // Monitorar disponibilidade da API principal (evita cascata de fetch failed)
+  startApiHealthMonitor();
   
   // Conectar WhatsApp
   await connectWhatsApp();
