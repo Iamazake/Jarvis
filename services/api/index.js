@@ -196,7 +196,8 @@ fastify.post('/webhook', async (request, reply) => {
       action: result.action || 'reply',
       response: result.response ?? '',
       cached: result.cached || false,
-      sender
+      sender,
+      reason: result.reason
     };
 
   } catch (error) {
@@ -208,6 +209,7 @@ fastify.post('/webhook', async (request, reply) => {
       success: false,
       action: 'ignore',
       response: '',
+      reason: 'error',
       error: error.message
     };
   }

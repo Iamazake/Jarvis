@@ -295,7 +295,8 @@ async function connectWhatsApp() {
           await sendMessage(sender, result.response);
           console.log(`📤 Respondido: ${result.response.substring(0, 50)}...`);
         } else if (result.action === 'ignore') {
-          console.log(`⏭️ Autopilot desativado para ${pushName}, ignorando.`);
+          const reason = result.reason ? ` (motivo: ${result.reason})` : '';
+          console.log(`⏭️ ${pushName}: ignorando${reason}`);
         }
       } catch (error) {
         console.error('❌ Erro ao processar:', error.message);

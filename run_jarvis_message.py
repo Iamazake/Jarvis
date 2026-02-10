@@ -49,7 +49,7 @@ def main():
             if args.jid and "@" in args.jid and args.sender:
                 ctx.update_contact_seen(args.jid, args.sender)
             if not ctx.is_autopilot_enabled_for(identifier):
-                output({'action': 'ignore', 'response': ''})
+                output({'action': 'ignore', 'response': '', 'reason': 'not_in_autopilot'})
                 return None
 
         # JID normalizado (LID -> @s.whatsapp.net) para histórico e contexto consistentes
@@ -76,12 +76,12 @@ def main():
             output({'action': 'reply', 'response': response, 'cached': False})
     except Exception as e:
         output({
-            'action': 'reply',
-            'response': f'Desculpe, ocorreu um erro ao processar: {str(e)}',
-            'cached': False,
+            'action': 'ignore',
+            'response': '',
+            'reason': 'error',
             'error': str(e)
         })
-        sys.exit(1)
+        sys.exit(0)
 
 
 if __name__ == '__main__':

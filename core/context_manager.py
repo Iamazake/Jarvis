@@ -397,7 +397,13 @@ class ContextManager:
         tone: str = "fofinho",
         ttl_minutes: int = 120,
     ) -> None:
-        """Ativa autopilot para um contato por JID (identidade estável). Nome só para exibição/alias."""
+        """Ativa autopilot para um contato por JID (identidade estável). Nome só para exibição/alias.
+        Se receber só nome (sem @) e já tivermos JID em contact_jid_by_name, grava por JID para match futuro."""
+        if jid and "@" not in jid:
+            existing_jid = self.get_jid_for_contact(jid)
+            if existing_jid:
+                display_name = display_name or jid
+                jid = existing_jid
         key = self._normalize_jid(jid) if jid and "@" in jid else self._normalize_contact_key(jid)
         if not key:
             return
@@ -454,6 +460,7 @@ class ContextManager:
         Unifica mesma pessoa: se o identifier for JID e não estiver em autopilot,
         verifica se algum nome que aponta para esse JID (contact_jid_by_name) tem autopilot
         (ex.: Tchuchuca e Dhyellen são a mesma pessoa com dois nomes).
+        Também considera match por substring: autopilot "Dhyellen" bate com pushName "Dhyellen Moreira".
         """
         if self.get_autopilot(identifier) is not None:
             return True
@@ -463,8 +470,17 @@ class ContextManager:
         if not jid_norm:
             return False
         for name, stored_jid in self._contact_jid_by_name.items():
-            if self._normalize_jid(stored_jid) == jid_norm and self.get_autopilot(name) is not None:
+            if self._normalize_jid(stored_jid) != jid_norm:
+                continue
+            if self.get_autopilot(name) is not None:
                 return True
+            # Match por substring: autopilot ativado para "dhyellen" e pushName "dhyellen moreira"
+            for ap_key, entry in self._autopilot_contacts.items():
+                if "@" in ap_key or not entry.get("enabled"):
+                    continue
+                if ap_key in name or name in ap_key:
+                    if self.get_autopilot(ap_key) is not None:
+                        return True
         return False
 
     def list_autopilot(self) -> List[Dict[str, Any]]:
