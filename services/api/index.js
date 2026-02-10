@@ -69,18 +69,21 @@ const state = {
 // ================================
 
 /**
- * Executa comando Python para processar mensagem via JARVIS (run_jarvis_message.py)
+ * Executa comando Python para processar mensagem via JARVIS (run_jarvis_message.py).
+ * Usa JID (from_jid) para decisão de autopilot; display_name só para exibição.
  */
-async function processPythonAI(message, sender) {
+async function processPythonAI(message, jid, displayName) {
   return new Promise((resolve, reject) => {
     const pythonScript = join(rootDir, 'run_jarvis_message.py');
     const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
 
-    const python = spawn(pythonCmd, [
-      pythonScript,
-      '--message', message,
-      '--sender', sender || 'user'
-    ], {
+    const args = [pythonScript, '--message', message];
+    if (jid && String(jid).includes('@')) {
+      args.push('--jid', String(jid));
+    }
+    args.push('--sender', displayName || jid || 'user');
+
+    const python = spawn(pythonCmd, args, {
       cwd: rootDir,
       env: { ...process.env, PYTHONIOENCODING: 'utf-8' }
     });
@@ -164,35 +167,34 @@ fastify.get('/stats', async (request, reply) => {
  * Webhook - Recebe mensagens do WhatsApp (Baileys)
  */
 fastify.post('/webhook', async (request, reply) => {
-  const { sender, message, timestamp, pushName } = request.body;
-  
-  if (!message || !sender) {
-    return reply.status(400).send({ error: 'sender e message são obrigatórios' });
+  const { sender, message, timestamp, pushName, from_jid, display_name } = request.body;
+  const jid = from_jid || sender;
+  const displayName = display_name || pushName || '';
+
+  if (!message || !jid) {
+    return reply.status(400).send({ error: 'sender/from_jid e message são obrigatórios' });
   }
 
   state.stats.received++;
   
   fastify.log.info({
     msg: 'Mensagem recebida',
-    sender,
-    pushName,
+    jid,
+    displayName: displayName || '(sem nome)',
     message: message.substring(0, 100)
   });
 
   try {
-    // Tenta resposta rápida primeiro
-    let result = quickResponse(message);
-    
-    if (!result) {
-      // Processa via Python AI
-      result = await processPythonAI(message, pushName || sender);
-    }
+    // Decisão reply/ignore só via Python (autopilot). Nunca usar quickResponse aqui:
+    // senão responderíamos "Olá!" mesmo com autopilot desativado.
+    const result = await processPythonAI(message, jid, displayName);
 
     state.stats.processed++;
 
     return {
       success: true,
-      response: result.response,
+      action: result.action || 'reply',
+      response: result.response ?? '',
       cached: result.cached || false,
       sender
     };
@@ -200,10 +202,12 @@ fastify.post('/webhook', async (request, reply) => {
   } catch (error) {
     state.stats.errors++;
     fastify.log.error({ msg: 'Erro ao processar', error: error.message });
-    
+
+    // Não enviar mensagem genérica (evita "Olá" ou greeting em caso de fetch/erro)
     return {
       success: false,
-      response: 'Desculpe, ocorreu um erro ao processar sua mensagem.',
+      action: 'ignore',
+      response: '',
       error: error.message
     };
   }

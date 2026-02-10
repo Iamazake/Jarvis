@@ -81,7 +81,80 @@ class Jarvis:
         await self.orchestrator.stop()
         
         logger.info(f"👋 {self.name} finalizado")
-    
+
+    def apply_out_meta(self, out_meta: Dict) -> None:
+        """
+        Aplica metadados de saída ao contexto (usado por process() e por handlers MCP).
+        Atualiza pending_plan, suggested_send, last_contact, autopilot, etc.
+        """
+        if not out_meta:
+            return
+        if out_meta.get("pending_plan") is not None:
+            self.context.set_pending_plan(out_meta["pending_plan"])
+        if out_meta.get("clear_pending_plan"):
+            self.context.clear_pending_plan()
+        if out_meta.get("set_suggested_send") is not None:
+            self.context.set_session("suggested_send", out_meta["set_suggested_send"])
+        if out_meta.get("clear_suggested_send"):
+            self.context.set_session("suggested_send", None)
+        if out_meta.get("last_contact"):
+            self.context.set_last_contact(out_meta["last_contact"])
+        if out_meta.get("monitored_contact"):
+            self.context.add_monitored_contact(out_meta["monitored_contact"])
+        if out_meta.get("remove_monitored_contact"):
+            self.context.remove_monitored_contact(out_meta["remove_monitored_contact"])
+        if out_meta.get("monitored_jid"):
+            self.context.set_last_monitored_jid(out_meta["monitored_jid"])
+            if out_meta.get("monitored_contact"):
+                self.context.set_active_target(
+                    out_meta["monitored_jid"], out_meta["monitored_contact"]
+                )
+        if out_meta.get("last_intent"):
+            self.context.set_last_intent(out_meta["last_intent"])
+        if out_meta.get("last_contact") and out_meta.get("sent_text"):
+            self.context.update_last_message(
+                out_meta["last_contact"], out_meta["sent_text"], from_me=True
+            )
+        if out_meta.get("enable_autopilot"):
+            ap = out_meta["enable_autopilot"]
+            jid = (ap.get("jid") or "").strip()
+            display_name = (ap.get("contact") or "").strip()
+            tone = ap.get("tone") or "fofinho"
+            ttl = int(
+                ap.get("ttl_minutes")
+                or self.config.get("AUTOPILOT_DEFAULT_TTL_MINUTES", 120)
+            )
+            if jid and "@" in jid:
+                self.context.enable_autopilot(
+                    jid,
+                    display_name=display_name or None,
+                    tone=tone,
+                    ttl_minutes=ttl,
+                )
+                if display_name:
+                    self.context.set_active_target(jid, display_name)
+            elif display_name:
+                self.context.enable_autopilot(
+                    display_name,
+                    display_name=display_name,
+                    tone=tone,
+                    ttl_minutes=ttl,
+                )
+        if out_meta.get("disable_autopilot"):
+            ap = out_meta["disable_autopilot"]
+            contact = (ap.get("contact") or "").strip()
+            if contact:
+                self.context.disable_autopilot(contact)
+        if out_meta.get("update_autopilot_tone"):
+            ut = out_meta["update_autopilot_tone"]
+            jid = (ut.get("jid") or "").strip()
+            contact = (ut.get("contact") or "").strip()
+            tone = (ut.get("tone") or "profissional").strip()
+            if jid or contact:
+                self.context.update_autopilot_tone(jid or contact, tone)
+        if out_meta.get("draft"):
+            self.context.set_session("pending_draft", out_meta["draft"])
+
     async def process(self, message: str, source: str = "cli", metadata: Dict = None) -> str:
         """
         Processa uma mensagem do usuário
@@ -103,8 +176,8 @@ class Jarvis:
         await self._emit('on_message', message, source, metadata)
         
         try:
-            # Adiciona ao contexto
-            self.context.add_message('user', message, source)
+            # Adiciona ao contexto (metadata com jid para histórico por contato no WhatsApp)
+            self.context.add_message('user', message, source, metadata)
             
             # Verifica se há rascunho pendente e o usuário quer enviar
             pending_draft = self.context.get_session("pending_draft")
@@ -114,7 +187,7 @@ class Jarvis:
                 if wm:
                     result = await wm.send_message(pending_draft['to'], pending_draft['message'])
                     response = f"🤖 *Enviando o rascunho...*\n\n{result}"
-                    self.context.add_message('assistant', response, source)
+                    self.context.add_message('assistant', response, source, metadata)
                     return response
                 return "❌ Módulo WhatsApp não disponível."
 
@@ -130,38 +203,13 @@ class Jarvis:
             else:
                 response, out_meta = result, {}
 
-            # Plano de execução: travar ou limpar
-            if out_meta.get("pending_plan") is not None:
-                self.context.set_pending_plan(out_meta["pending_plan"])
-            if out_meta.get("clear_pending_plan"):
-                self.context.clear_pending_plan()
+            self.apply_out_meta(out_meta)
 
-            # Sugestão de envio ("Quer que eu envie para X?" → guardar para próximo "sim")
-            if out_meta.get("set_suggested_send") is not None:
-                self.context.set_session("suggested_send", out_meta["set_suggested_send"])
-            if out_meta.get("clear_suggested_send"):
-                self.context.set_session("suggested_send", None)
+            # Nunca responder "não tenho capacidade" em fluxos WhatsApp; substituir por mensagem útil
+            response = self._sanitize_whatsapp_response(response)
 
-            # Atualiza contexto de curto prazo (ex: último contato mencionado)
-            if out_meta.get("last_contact"):
-                self.context.set_last_contact(out_meta["last_contact"])
-            if out_meta.get("monitored_contact"):
-                self.context.add_monitored_contact(out_meta["monitored_contact"])
-            if out_meta.get("last_intent"):
-                self.context.set_last_intent(out_meta["last_intent"])
-
-            # Cache: última mensagem enviada para contato
-            if out_meta.get("last_contact") and out_meta.get("sent_text"):
-                self.context.update_last_message(
-                    out_meta["last_contact"], out_meta["sent_text"], from_me=True
-                )
-
-            # Draft (modo copiloto) — guarda no contexto da sessão
-            if out_meta.get("draft"):
-                self.context.set_session("pending_draft", out_meta["draft"])
-
-            # Adiciona resposta ao contexto
-            self.context.add_message('assistant', response, source)
+            # Adiciona resposta ao contexto (e ao histórico por JID quando WhatsApp)
+            self.context.add_message('assistant', response, source, metadata)
             
             # Notifica callbacks
             await self._emit('on_response', response, source)
@@ -173,6 +221,29 @@ class Jarvis:
             await self._emit('on_error', str(e))
             return f"Desculpe, ocorreu um erro: {str(e)}"
     
+    @staticmethod
+    def _sanitize_whatsapp_response(response: str) -> str:
+        """Substitui respostas proibidas (ex.: 'não tenho capacidade de monitorar') por mensagem útil."""
+        if not response or not isinstance(response, str):
+            return response
+        r = response.strip().lower()
+        forbidden = (
+            'não tenho a capacidade',
+            'não tenho capacidade',
+            'não posso monitorar',
+            'não consigo monitorar',
+            'não tenho como monitorar',
+            'capacidade de monitorar',
+            'monitorar pessoas',
+            'monitorar interações',
+        )
+        if any(f in r for f in forbidden):
+            return (
+                "Não consegui identificar o contato. Diga o nome de quem você quer monitorar ou ativar autopilot "
+                "(ex.: monitore o contato Tchuchuca e quando ela mandar mensagem, entretenha)."
+            )
+        return response
+
     @staticmethod
     def _is_draft_confirm(message: str) -> bool:
         """Detecta se o usuário quer enviar o rascunho pendente."""

@@ -46,6 +46,7 @@ Regras:
 - Seja direto mas amigável
 - Se não souber algo, admita e sugira alternativas
 - Formate respostas de forma clara (use listas, negrito quando apropriado)
+- Você PODE enviar mensagens pelo WhatsApp quando o serviço estiver ativo (start.bat opção 3 ou 4). NUNCA diga que não pode enviar mensagens ou interagir com contatos.
 """
     
     async def start(self):

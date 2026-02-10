@@ -124,11 +124,11 @@ class WhatsAppModule:
         return jid
 
     async def _find_contact_with_meta(
-        self, name: str
+        self, name: str, context: Optional[Dict] = None
     ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """
         Retorna (jid, nome_resolvido, mensagem_confirmacao).
-        Se houver empate ou sugestão, mensagem_confirmacao contém texto para o usuário.
+        Se context tiver contact_jid_by_name (JID real do webhook), usa primeiro.
         """
         # Número entre parênteses ou só número
         num_match = re.search(r'\((\d{10,15})\)', name)
@@ -137,6 +137,15 @@ class WhatsAppModule:
         digits = ''.join(filter(str.isdigit, name))
         if len(digits) >= 10:
             return self._format_phone(digits), name.strip(), None
+
+        # Regra de ouro: priorizar JID já visto pelo webhook (evita JID errado vs. API)
+        if context:
+            by_name = context.get("contact_jid_by_name") or {}
+            name_lower = name.strip().lower()
+            if name_lower in by_name:
+                jid = by_name[name_lower]
+                if jid and "@" in jid:
+                    return jid, name.strip(), None
 
         result = await self._api_request("GET", "/contacts")
         if "error" in result:
@@ -279,7 +288,7 @@ class WhatsAppModule:
         entities = getattr(intent, 'entities', {}) or {}
 
         # Validação de serviço: antes de qualquer ação WhatsApp, verificar se está rodando
-        if intent_type in ('whatsapp_send', 'whatsapp_check', 'whatsapp_read', 'whatsapp_monitor', 'whatsapp_reply'):
+        if intent_type in ('whatsapp_send', 'whatsapp_check', 'whatsapp_read', 'whatsapp_monitor', 'whatsapp_reply', 'whatsapp_autoreply_enable', 'whatsapp_autoreply_disable', 'whatsapp_autopilot_status', 'whatsapp_autopilot_set_tone', 'whatsapp_monitor_status'):
             if not await self.is_service_available():
                 return (
                     "O serviço WhatsApp não está rodando. Para usar essas funções, inicie com opção 3 ou 4 no start.bat.",
@@ -302,7 +311,7 @@ class WhatsAppModule:
                 return "❌ Para quem devo enviar? Diga: manda mensagem para [nome] dizendo que [texto].", {}
             if not msg_text or len(msg_text) < 2:
                 msg_text = "Olá! O Jarvis está à disposição."
-            resp, meta = await self.send_message(contact, msg_text)
+            resp, meta = await self.send_message(contact, msg_text, context)
             return resp, meta or {}
 
         if intent_type == 'whatsapp_check':
@@ -319,8 +328,94 @@ class WhatsAppModule:
                     contact = num_part
                 else:
                     contact = name_part.strip()
-            resp, meta = await self.get_chat_history_with_meta(contact)
+            resp, meta = await self.get_chat_history_with_meta(contact, 20, context)
             return resp, meta or {}
+
+        if intent_type == 'whatsapp_autoreply_enable':
+            raw_contact = (entities.get('contact') or '').strip()
+            if raw_contact.lower() in ('ela', 'ele', 'dele', 'dela', 'ele/a', 'ela/ele'):
+                contact = (context.get('active_target_name') or context.get('last_monitored_contact') or context.get('last_contact') or '').strip()
+                use_last_jid = context.get('active_target_jid') or context.get('last_monitored_jid')
+            else:
+                contact = raw_contact or (context.get('active_target_name') or context.get('last_monitored_contact') or '').strip()
+                use_last_jid = None
+            tone = "fofinho"
+            if not contact:
+                return (
+                    "Para ativar auto-resposta, diga qual contato (ex.: monitore o contato Tchuchuca e quando ela mandar mensagem, entretenha) ou diga o nome do contato.",
+                    {},
+                )
+            jid = use_last_jid
+            display_name = contact
+            if not jid or not isinstance(jid, str) or "@" not in jid:
+                jid, resolved_name, _ = await self._find_contact_with_meta(contact, context)
+                if resolved_name:
+                    display_name = resolved_name
+            if not jid:
+                return (
+                    f"❌ Não encontrei o contato '{contact}' para ativar o autopilot. Verifique o nome ou monitore o contato antes.",
+                    {},
+                )
+            return (
+                f"Autopilot ativado para **{display_name}** (tom {tone}) por 2 horas. Quando mandar mensagem, respondo automaticamente.",
+                {"enable_autopilot": {"jid": jid, "contact": display_name, "tone": tone}},
+            )
+
+        if intent_type == 'whatsapp_autoreply_disable':
+            contact = entities.get('contact', '').strip() or (context.get('last_monitored_contact') or context.get('last_contact') or '').strip()
+            if contact:
+                return (
+                    f"Autopilot desativado para **{contact}**. Não respondo mais automaticamente às mensagens.",
+                    {"disable_autopilot": {"contact": contact}},
+                )
+            return "Para qual contato desativar o autopilot? Ex: pare de responder a Tchuchuca.", {}
+
+        if intent_type == 'whatsapp_autopilot_status':
+            autopilot_list = context.get('autopilot_list') or []
+            if not autopilot_list:
+                return "Nenhum contato com autopilot ativo no momento.", {}
+            lines = ["**Status do autopilot:**"]
+            for item in autopilot_list:
+                exp = item.get('expires_at')
+                exp_str = str(exp)[:19] if exp else "?"
+                lines.append(f"• **{item.get('contact', '?')}** — tom {item.get('tone', 'fofinho')} (expira {exp_str})")
+            return "\n".join(lines), {}
+
+        if intent_type == 'whatsapp_autopilot_set_tone':
+            contact = (entities.get('contact') or '').strip()
+            tone = (entities.get('tone') or '').strip().lower()
+            if not tone or tone not in ('profissional', 'fofinho', 'formal', 'informal'):
+                tone = 'profissional'
+            if not contact or contact in ('dele', 'dela', 'ele', 'ela'):
+                contact = (context.get('active_target_name') or context.get('last_monitored_contact') or context.get('last_contact') or '').strip()
+            if not contact:
+                return "Para qual contato mudar o tom? Ex: mude o tom do Douglas para profissional.", {}
+            jid, resolved_name, _ = await self._find_contact_with_meta(contact, context)
+            if not jid:
+                return f"❌ Não encontrei o contato '{contact}'.", {}
+            name = resolved_name or contact
+            return (
+                f"✅ Tom do autopilot de **{name}** atualizado para **{tone}**.",
+                {"update_autopilot_tone": {"jid": jid, "contact": name, "tone": tone}},
+            )
+
+        if intent_type == 'whatsapp_monitor_status':
+            monitored = context.get('monitored_contacts') or []
+            if not monitored:
+                return "Nenhum contato em monitoramento no momento. Use: monitore o contato [nome].", {}
+            lines = ["**Status de monitoramento:**"]
+            for name in monitored:
+                lines.append(f"• **{name}**")
+            return "\n".join(lines), {}
+
+        if intent_type == 'whatsapp_monitor_disable':
+            contact = entities.get('contact', '').strip() or (context.get('last_monitored_contact') or context.get('last_contact') or '').strip()
+            if not contact:
+                return "Para qual contato cancelar o monitoramento? Ex: cancele o monitoramento do Douglas.", {}
+            return (
+                f"Monitoramento cancelado para **{contact}**. Não estou mais monitorando essa conversa.",
+                {"remove_monitored_contact": contact},
+            )
 
         if intent_type == 'whatsapp_monitor':
             contact = entities.get('contact', '').strip()
@@ -329,7 +424,7 @@ class WhatsAppModule:
                     "❌ De quem você quer monitorar a conversa? Ex: monitore a conversa do Douglas.",
                     {},
                 )
-            return await self.start_monitor(contact)
+            return await self.start_monitor(contact, context)
 
         if intent_type == 'whatsapp_reply':
             contact = entities.get('contact', '').strip()
@@ -342,17 +437,17 @@ class WhatsAppModule:
                 return "❌ Para quem devo responder? Diga o contato ou 'responda a mensagem dele' após falar com alguém.", {}
             composed = (metadata or {}).get('composed_message', '').strip()
             msg_text = composed or "Olá! O Jarvis está à disposição."
-            resp, meta = await self.send_message(contact, msg_text)
+            resp, meta = await self.send_message(contact, msg_text, context)
             return resp, meta or {}
 
         return "Comando WhatsApp não reconhecido.", {}
 
     async def send_message(
-        self, to: str, message: str
+        self, to: str, message: str, context: Optional[Dict] = None
     ) -> Tuple[str, Optional[Dict]]:
         """
         Envia mensagem. Retorna (resposta_para_usuário, metadata).
-        metadata pode conter last_contact para o contexto.
+        context opcional: prioriza contact_jid_by_name (JID real do webhook).
         """
         meta: Optional[Dict] = None
         display_name = to
@@ -362,7 +457,7 @@ class WhatsAppModule:
         elif to.replace('+', '').replace(' ', '').isdigit() or to.startswith('+'):
             jid = self._format_phone(to)
         else:
-            jid, resolved_name, confirm_msg = await self._find_contact_with_meta(to)
+            jid, resolved_name, confirm_msg = await self._find_contact_with_meta(to, context)
             if not jid:
                 if confirm_msg:
                     return f"❌ {confirm_msg}", None
@@ -410,7 +505,7 @@ class WhatsAppModule:
         return resp
 
     async def get_chat_history_with_meta(
-        self, contact: str, limit: int = 20
+        self, contact: str, limit: int = 20, context: Optional[Dict] = None
     ) -> Tuple[str, Optional[Dict]]:
         """Retorna (texto do chat, metadata com last_contact se resolvido)."""
         meta: Optional[Dict] = None
@@ -418,7 +513,7 @@ class WhatsAppModule:
         if contact.isdigit() or contact.startswith('+'):
             jid = self._format_phone(contact)
         else:
-            jid, resolved_name, confirm_msg = await self._find_contact_with_meta(contact)
+            jid, resolved_name, confirm_msg = await self._find_contact_with_meta(contact, context)
             if not jid:
                 if confirm_msg:
                     return f"❌ {confirm_msg}", None
@@ -454,12 +549,12 @@ class WhatsAppModule:
             lines.append(f"{prefix} {text[:150]}")
         return "\n".join(lines), meta
 
-    async def start_monitor(self, contact: str) -> Tuple[str, Dict]:
+    async def start_monitor(self, contact: str, context: Optional[Dict] = None) -> Tuple[str, Dict]:
         """
         Ativa monitoramento da conversa do contato (tarefa persistente).
-        Por enquanto registra a intenção; a reação a novas mensagens depende do serviço WhatsApp.
+        context opcional: prioriza contact_jid_by_name (JID real do webhook).
         """
-        jid, resolved_name, confirm_msg = await self._find_contact_with_meta(contact)
+        jid, resolved_name, confirm_msg = await self._find_contact_with_meta(contact, context)
         if not jid:
             if confirm_msg:
                 return f"❌ {confirm_msg}", {}
@@ -486,7 +581,7 @@ class WhatsAppModule:
         msg = f"✅ Vou monitorar a conversa de **{name}**."
         if confirm_msg:
             msg = f"{confirm_msg}\n{msg}"
-        return msg, {"last_contact": name, "monitored_contact": name}
+        return msg, {"last_contact": name, "monitored_contact": name, "monitored_jid": jid}
 
 
 def _service_not_running_msg() -> str:

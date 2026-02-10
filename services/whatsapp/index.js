@@ -38,12 +38,23 @@ const logger = pino({
   level: 'silent'
 });
 
+// Concorrência: processar até N mensagens em paralelo (evita bloqueio e timeout em cascata)
+const MESSAGE_CONCURRENCY = 3;
+
 // Estado global
 let sock = null;
 let isConnected = false;
 let startTime = Date.now();
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 5;
+
+// Rate limit: mínimo 1s entre envios para o mesmo JID (evita spam)
+const MIN_SEND_INTERVAL_MS = 1000;
+const lastSendTimeByJid = {};
+
+// Dedupe: últimos message_id processados (evita responder 2x ao mesmo evento)
+const RECENT_MESSAGE_IDS_MAX = 500;
+const recentMessageIds = [];
 
 // Cache de contatos do WhatsApp
 let contactsCache = {};
@@ -219,86 +230,89 @@ async function connectWhatsApp() {
       saveContactsCache();
     });
 
+    // Concorrência limitada para processar mensagens (evita bloqueio e timeouts em cascata)
+    const MESSAGE_CONCURRENCY = 3;
+
+    const processOneMessage = async (msg) => {
+      if (msg.key.fromMe) return;
+      const messageId = msg.key.id;
+      if (messageId && recentMessageIds.includes(messageId)) return;
+      if (messageId) {
+        recentMessageIds.push(messageId);
+        if (recentMessageIds.length > RECENT_MESSAGE_IDS_MAX) recentMessageIds.shift();
+      }
+      const sender = msg.key.remoteJid;
+      const participant = msg.key.participant || null;
+      const pushName = msg.pushName || 'Usuário';
+      const isGroup = sender.endsWith('@g.us');
+      const senderJid = isGroup ? (participant || sender) : sender;
+      updateContact(sender, null, pushName);
+      const mediaType = detectMediaType(msg);
+      const hasMedia = mediaType !== null;
+      const text = msg.message?.conversation ||
+        msg.message?.extendedTextMessage?.text ||
+        msg.message?.imageMessage?.caption ||
+        msg.message?.videoMessage?.caption ||
+        '';
+      if (text) {
+        console.log(`📩 ${pushName}: ${text.substring(0, 50)}...`);
+      } else if (hasMedia) {
+        console.log(`📎 ${pushName}: [${mediaType}]`);
+      }
+      const payload = {
+        sender,
+        from_jid: senderJid,
+        chat_id: sender,
+        sender_jid: senderJid,
+        display_name: pushName || '',
+        message_id: msg.key.id || '',
+        message: text,
+        pushName,
+        timestamp: Date.now(),
+        messageTimestamp: msg.messageTimestamp,
+        isGroup,
+        hasMedia,
+        mediaType,
+        mimetype: getMessageMimetype(msg),
+        caption: msg.message?.imageMessage?.caption ||
+          msg.message?.videoMessage?.caption || ''
+      };
+      notifyService('monitors', '/webhook/message', payload);
+      if (hasMedia) {
+        notifyService('monitors', '/webhook/media', payload);
+        notifyService('api', '/media', payload);
+      }
+      if (!text) return;
+      try {
+        console.log(`🤖 Autopilot: processando mensagem de ${pushName} → Jarvis (reply/ignore)`);
+        const response = await fetch(`${CONFIG.services.api}/webhook`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const result = await response.json();
+        if (result.success && result.action !== 'ignore' && result.response) {
+          await sendMessage(sender, result.response);
+          console.log(`📤 Respondido: ${result.response.substring(0, 50)}...`);
+        } else if (result.action === 'ignore') {
+          console.log(`⏭️ Autopilot desativado para ${pushName}, ignorando.`);
+        }
+      } catch (error) {
+        console.error('❌ Erro ao processar:', error.message);
+      }
+    };
+
     // Receber mensagens
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
-      
-      for (const msg of messages) {
-        // Ignorar mensagens próprias
-        if (msg.key.fromMe) continue;
-        
-        const sender = msg.key.remoteJid;
-        const pushName = msg.pushName || 'Usuário';
-        const isGroup = sender.endsWith('@g.us');
-        
-        // Atualizar cache de contatos
-        updateContact(sender, null, pushName);
-        
-        // Detectar tipo de mídia
-        const mediaType = detectMediaType(msg);
-        const hasMedia = mediaType !== null;
-        
-        // Extrair texto
-        const text = msg.message?.conversation || 
-                     msg.message?.extendedTextMessage?.text ||
-                     msg.message?.imageMessage?.caption ||
-                     msg.message?.videoMessage?.caption ||
-                     '';
-        
-        // Log da mensagem
-        if (text) {
-          console.log(`📩 ${pushName}: ${text.substring(0, 50)}...`);
-        } else if (hasMedia) {
-          console.log(`📎 ${pushName}: [${mediaType}]`);
-        }
-        
-        // Preparar payload
-        const payload = {
-          sender,
-          message: text,
-          pushName,
-          timestamp: Date.now(),
-          isGroup,
-          hasMedia,
-          mediaType,
-          mimetype: getMessageMimetype(msg),
-          caption: msg.message?.imageMessage?.caption || 
-                   msg.message?.videoMessage?.caption || ''
-        };
-        
-        // ========================================
-        // Notificar serviços
-        // ========================================
-        
-        // 1. Notificar Monitors Service (alertas, keywords, VIP)
-        notifyService('monitors', '/webhook/message', payload);
-        
-        // 2. Se for mídia, notificar também o endpoint de mídia
-        if (hasMedia) {
-          notifyService('monitors', '/webhook/media', payload);
-          notifyService('api', '/media', payload);
-        }
-        
-        // 3. Só responder via IA se tiver texto
-        if (!text) continue;
-        
-        // Processar via API Service (gera resposta com IA)
-        try {
-          const response = await fetch(`${CONFIG.services.api}/webhook`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          });
-          
-          const result = await response.json();
-          
-          if (result.success && result.response) {
-            await sendMessage(sender, result.response);
-            console.log(`📤 Respondido: ${result.response.substring(0, 50)}...`);
+      for (let i = 0; i < messages.length; i += MESSAGE_CONCURRENCY) {
+        const batch = messages.slice(i, i + MESSAGE_CONCURRENCY);
+        const results = await Promise.allSettled(batch.map((msg) => processOneMessage(msg)));
+        results.forEach((r) => {
+          if (r.status === 'rejected') {
+            console.error('❌ Mensagem falhou:', r.reason?.message || r.reason);
           }
-        } catch (error) {
-          console.error('❌ Erro ao processar:', error.message);
-        }
+        });
       }
     });
 
@@ -443,8 +457,16 @@ async function sendMessage(to, text) {
   if (!sock || !isConnected) {
     throw new Error('WhatsApp não conectado');
   }
-  
+  const jid = typeof to === 'string' ? to : (to?.id || to);
+  const last = lastSendTimeByJid[jid];
+  if (last != null) {
+    const elapsed = Date.now() - last;
+    if (elapsed < MIN_SEND_INTERVAL_MS) {
+      await new Promise((r) => setTimeout(r, MIN_SEND_INTERVAL_MS - elapsed));
+    }
+  }
   await sock.sendMessage(to, { text });
+  lastSendTimeByJid[jid] = Date.now();
 }
 
 function formatUptime() {

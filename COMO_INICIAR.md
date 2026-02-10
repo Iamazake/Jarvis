@@ -43,6 +43,19 @@ Se o serviço não estiver rodando, o JARVIS avisa e diz como iniciar.
 
 ---
 
+## Autopilot (resposta automática por contato)
+
+Com o WhatsApp e a API rodando (opção 4 no start.bat):
+
+1. **Ativar:** "Monitore o contato [nome]" e depois "Quando ela mandar mensagem, entretenha ela" (ou "converse com o contato [nome]").
+2. O JARVIS ativa o autopilot para esse contato por 2 horas. Mensagens recebidas desse contato passam a ser respondidas automaticamente.
+3. **Desativar:** "Pare de responder a [nome]" ou "Desative autopilot para [nome]".
+4. **Status:** "Status do autopilot" para ver quais contatos estão com auto-resposta ativa.
+
+Só contatos com autopilot ativado recebem resposta automática; os demais são ignorados (evita responder a todos).
+
+---
+
 ## Resumo
 
 | O que você quer | O que fazer |

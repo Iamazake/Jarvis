@@ -245,19 +245,27 @@ class Orchestrator:
                     {"set_suggested_send": {"contact": name, "tone": "fofinha"}},
                 )
 
-        # Regra de ouro: confiança < 0.7 → confirmar, não executar (exceto cumprimentos/agradecimentos)
-        # Exceção: conversation que é pergunta/cumprimento → ir direto para a IA (evita loop "responda em conversa?")
+        # Regra de ouro: confiança < 0.7 → confirmar, não executar (exceto conversa/cumprimentos/ajuda)
+        # NUNCA pedir confirmação para conversation, greeting, thanks, farewell, help, system_info
         CONFIDENCE_THRESHOLD = 0.7
-        NO_CONFIRM_INTENTS = ('greeting', 'thanks', 'farewell')
+        NO_CONFIRM_INTENTS = ('greeting', 'thanks', 'farewell', 'conversation', 'conversation_question', 'help', 'system_info', 'whatsapp_autoreply_enable', 'whatsapp_autoreply_disable', 'whatsapp_autopilot_status', 'whatsapp_autopilot_set_tone', 'whatsapp_monitor_status', 'whatsapp_monitor_disable')
         if intent.confidence < CONFIDENCE_THRESHOLD and intent.type not in NO_CONFIRM_INTENTS:
-            if intent.type == "conversation" and self._looks_like_direct_question_or_greeting(message):
-                pass  # não pedir confirmação; seguir para rotear ao módulo ai
-            else:
-                desc = self._intent_description_for_confirm(intent.type)
-                return (
-                    f"Você quer que eu {desc}? (Responda sim para confirmar.)",
-                    {},
-                )
+            desc = self._intent_description_for_confirm(intent.type)
+            return (
+                f"Você quer que eu {desc}? (Responda sim para confirmar.)",
+                {},
+            )
+
+        # 1d. Monitor com dois contatos → perguntar qual primeiro (sem suporte a lista ainda)
+        if intent.type == "whatsapp_monitor":
+            contact = ((getattr(intent, "entities", None) or {}).get("contact") or "").strip()
+            if contact and " e " in contact:
+                parts = [p.strip() for p in contact.split(" e ", 1)]
+                if len(parts) == 2 and parts[0] and parts[1]:
+                    return (
+                        f"Posso monitorar um por vez. Qual você quer monitorar primeiro: **{parts[0]}** ou **{parts[1]}**?",
+                        {},
+                    )
 
         # 2. Aprende com a mensagem (se módulo de memória disponível)
         if 'memory' in self.modules:
@@ -286,7 +294,42 @@ class Orchestrator:
             )
 
         return response, out_meta or {}
-    
+
+    async def execute_action(
+        self,
+        intent_type: str,
+        entities: Dict,
+        message: str,
+        context: Dict,
+        source: str = "cli",
+        metadata: Dict = None,
+    ) -> tuple:
+        """
+        Executa uma ação estruturada (chamado pelo MCP / Jarvis Actions).
+        Não aplica confirmação de confiança nem compose message; a IA já decidiu a ação.
+        Retorna (response, out_meta).
+        """
+        from .intent_classifier import Intent
+
+        intent = Intent(
+            type=intent_type,
+            confidence=1.0,
+            entities=dict(entities) if entities else {},
+        )
+        metadata = metadata or {}
+        enriched_context = {**context}
+        if "memory" in self.modules:
+            try:
+                memory_context = await self.modules["memory"].get_context_for_ai()
+                if memory_context:
+                    enriched_context["memory"] = memory_context
+            except Exception as e:
+                logger.debug("Memória não disponível para execute_action: %s", e)
+        response, out_meta = await self._route_to_module(
+            intent, message, enriched_context, source, metadata
+        )
+        return response, out_meta or {}
+
     def _intent_description_for_confirm(self, intent_type: str) -> str:
         """Descrição curta da intenção para mensagem de confirmação."""
         descriptions = {
@@ -296,6 +339,12 @@ class Orchestrator:
             'whatsapp_read': 'leia as mensagens de um contato',
             'whatsapp_check': 'verifique as mensagens não lidas',
             'whatsapp_monitor': 'monitore um contato',
+            'whatsapp_autoreply_enable': 'ative auto-resposta para um contato',
+            'whatsapp_autoreply_disable': 'desative auto-resposta para um contato',
+            'whatsapp_autopilot_status': 'mostre status do autopilot',
+            'whatsapp_autopilot_set_tone': 'mude o tom do autopilot',
+            'whatsapp_monitor_status': 'mostre status de monitoramento',
+            'whatsapp_monitor_disable': 'cancele o monitoramento',
             'search': 'pesquise na web',
             'app_control': 'execute um aplicativo',
             'reminder': 'crie um lembrete',
@@ -342,7 +391,7 @@ class Orchestrator:
     def _is_stop_command(self, message: str) -> bool:
         """Comando global de parar: 'para com isso', 'pare', 'cancela', etc. Não depende de classificação."""
         msg = (message or "").strip().lower()
-        stop_phrases = ("para com isso", "para com isso.", "pare", "cancela", "cancelar", "para.", "para!")
+        stop_phrases = ("para com isso", "para com isso.", "para com iso", "para com iso.", "pare", "cancela", "cancelar", "para.", "para!")
         return msg in stop_phrases or msg == "para"
 
     def _looks_like_direct_question_or_greeting(self, message: str) -> bool:
@@ -615,6 +664,12 @@ class Orchestrator:
             'weather': 'search',
             'news': 'search',
             'whatsapp_send': 'whatsapp',
+            'whatsapp_autoreply_enable': 'whatsapp',
+            'whatsapp_autoreply_disable': 'whatsapp',
+            'whatsapp_autopilot_status': 'whatsapp',
+            'whatsapp_autopilot_set_tone': 'whatsapp',
+            'whatsapp_monitor_status': 'whatsapp',
+            'whatsapp_monitor_disable': 'whatsapp',
             'whatsapp_check': 'whatsapp',
             'whatsapp_read': 'whatsapp',
             'whatsapp_monitor': 'whatsapp',
@@ -624,6 +679,7 @@ class Orchestrator:
             'schedule': 'calendar',
             'file_operation': 'tools',
             'system_command': 'tools',
+            'system_info': 'tools',
             'app_control': 'tools',
             'conversation': 'ai',
             'conversation_question': 'ai',

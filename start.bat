@@ -34,13 +34,14 @@ REM Menu
 echo.
 echo Escolha uma opcao:
 echo.
-echo   1. Iniciar JARVIS (CLI)
+echo   1. Iniciar JARVIS (CLI com MCP)
 echo   2. Iniciar JARVIS (Voz)
 echo   3. Iniciar WhatsApp Service
 echo   4. Iniciar Tudo (WhatsApp + JARVIS) - use para enviar msg WhatsApp
 echo   5. Verificar Status
-echo   6. Instalar Dependencias
-echo   7. Sair
+echo   6. JARVIS Legado (Orchestrator/autopilot) - comandos WhatsApp
+echo   7. Instalar Dependencias
+echo   8. Sair
 echo.
 set /p choice="Opcao: "
 
@@ -49,8 +50,9 @@ if "%choice%"=="2" goto voice
 if "%choice%"=="3" goto whatsapp
 if "%choice%"=="4" goto all
 if "%choice%"=="5" goto status
-if "%choice%"=="6" goto install
-if "%choice%"=="7" goto exit
+if "%choice%"=="6" goto legado
+if "%choice%"=="7" goto install
+if "%choice%"=="8" goto exit
 
 echo Opcao invalida!
 goto menu
@@ -105,6 +107,12 @@ echo [INFO] Verificando status...
 python jarvis.py --status
 goto menu
 
+:legado
+echo.
+echo [INFO] Iniciando JARVIS no modo Legado (Orchestrator + WhatsApp/autopilot)...
+python jarvis.py --legado
+goto menu
+
 :install
 echo.
 echo [INFO] Instalando dependencias Python...
@@ -112,8 +120,12 @@ pip install -r requirements.txt
 
 echo.
 echo [INFO] Instalando dependencias Node.js...
-cd services\whatsapp && npm install && cd ..\..
-cd services\api && npm install && cd ..\..
+cd services\whatsapp
+call npm install
+cd ..\..
+cd services\api
+call npm install
+cd ..\..
 
 echo.
 echo [OK] Dependencias instaladas!

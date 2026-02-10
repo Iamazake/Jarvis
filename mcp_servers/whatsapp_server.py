@@ -13,15 +13,54 @@ import asyncio
 import aiohttp
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 from datetime import datetime
+
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from mcp_servers.base import MCPServer, Tool
 
 logger = logging.getLogger(__name__)
+
+
+class CircuitBreaker:
+    """Circuit breaker: closed -> open após N falhas; open por timeout s; half-open permite 1 teste."""
+
+    def __init__(self, failure_threshold: int = 5, timeout_seconds: float = 60.0):
+        self.failure_threshold = failure_threshold
+        self.timeout_seconds = timeout_seconds
+        self.failure_count = 0
+        self.last_failure_time: Optional[float] = None
+        self._state = "closed"  # closed | open | half_open
+
+    @property
+    def state(self) -> str:
+        if self._state == "open" and self.last_failure_time is not None:
+            if time.monotonic() - self.last_failure_time >= self.timeout_seconds:
+                self._state = "half_open"
+        return self._state
+
+    def record_success(self) -> None:
+        self._state = "closed"
+        self.failure_count = 0
+
+    def record_failure(self) -> None:
+        self.failure_count += 1
+        self.last_failure_time = time.monotonic()
+        if self.failure_count >= self.failure_threshold:
+            self._state = "open"
+
+    def can_attempt(self) -> bool:
+        return self.state in ("closed", "half_open")
 
 
 class WhatsAppServer(MCPServer):
@@ -43,6 +82,9 @@ class WhatsAppServer(MCPServer):
         # Cache de contatos
         self._contacts_cache = {}
         self._last_messages = []
+        
+        # Circuit breaker para evitar sobrecarga quando o serviço WhatsApp está down
+        self._circuit_breaker = CircuitBreaker(failure_threshold=5, timeout_seconds=60.0)
     
     def _load_env(self):
         """Carrega configurações"""
@@ -185,20 +227,41 @@ class WhatsAppServer(MCPServer):
             "ou execute: cd services/whatsapp && node index.js"
         )
 
-    async def _api_request(self, method: str, endpoint: str, data: Dict = None) -> Dict:
-        """Faz requisição à API do WhatsApp"""
+    async def _raw_api_request(self, method: str, endpoint: str, data: Dict = None):
+        """Requisição à API do WhatsApp; levanta exceção em falha de rede/timeout/5xx."""
         url = f"{self.api_url}{endpoint}"
-        
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession() as session:
+            if method == "GET":
+                async with session.get(url, timeout=timeout) as resp:
+                    if resp.status >= 500:
+                        raise aiohttp.ClientError(f"Server error {resp.status}")
+                    return await resp.json()
+            else:
+                async with session.post(url, json=data, timeout=timeout) as resp:
+                    if resp.status >= 500:
+                        raise aiohttp.ClientError(f"Server error {resp.status}")
+                    return await resp.json()
+
+    async def _api_request_with_retry(self, method: str, endpoint: str, data: Dict = None) -> Dict:
+        """Faz requisição com retry (3 tentativas, backoff exponencial) em erros de rede/timeout/5xx."""
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=1, max=5),
+            retry=retry_if_exception_type((
+                aiohttp.ClientConnectorError,
+                aiohttp.ClientError,
+                asyncio.TimeoutError,
+                ConnectionError,
+            )),
+            reraise=True,
+        )
+        async def _do():
+            return await self._raw_api_request(method, endpoint, data)
+
         try:
-            async with aiohttp.ClientSession() as session:
-                if method == "GET":
-                    async with session.get(url, timeout=10) as resp:
-                        return await resp.json()
-                else:
-                    async with session.post(url, json=data, timeout=10) as resp:
-                        return await resp.json()
-                        
-        except aiohttp.ClientConnectorError as e:
+            return await _do()
+        except (aiohttp.ClientConnectorError, ConnectionError) as e:
             logger.error(f"API WhatsApp inacessível: {e}")
             return {"error": self._service_not_running_message(), "service_down": True}
         except aiohttp.ClientError as e:
@@ -216,6 +279,20 @@ class WhatsAppServer(MCPServer):
             if self._is_connection_error(err):
                 return {"error": self._service_not_running_message(), "service_down": True}
             return {"error": err}
+
+    async def _api_request(self, method: str, endpoint: str, data: Dict = None) -> Dict:
+        """Faz requisição à API do WhatsApp (com circuit breaker e retry)."""
+        if not self._circuit_breaker.can_attempt():
+            return {
+                "error": "Serviço WhatsApp temporariamente indisponível. Tente novamente em alguns instantes.",
+                "service_down": True,
+            }
+        result = await self._api_request_with_retry(method, endpoint, data)
+        if "error" in result and result.get("service_down"):
+            self._circuit_breaker.record_failure()
+        else:
+            self._circuit_breaker.record_success()
+        return result
     
     def _format_phone(self, number: str) -> str:
         """Formata número de telefone"""

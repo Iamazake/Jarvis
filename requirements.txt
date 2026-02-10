@@ -18,7 +18,7 @@ sentence-transformers>=2.2.0
 numpy>=1.24.0
 
 # === Pesquisa Web ===
-duckduckgo-search>=4.0.0
+ddgs>=9.0.0
 wikipedia>=1.4.0
 tavily-python>=0.3.0  # opcional - pesquisa para IA
 requests>=2.31.0
@@ -57,10 +57,16 @@ rich>=13.0.0               # Interface rica (opcional)
 # === Validação e Schemas ===
 pydantic>=2.0.0            # Validação de dados e schemas
 
+# === Circuit Breaker e Retry (MCP WhatsApp) ===
+tenacity>=8.2.0
+
 # === Circuit Breaker e Rate Limiting ===
 # Nota: Implementação customizada incluída, mas pode usar bibliotecas externas
 # pybreaker>=1.0.0         # Circuit breaker (opcional)
 # limits>=3.0.0            # Rate limiting (opcional)
+
+# === Observabilidade (métricas Prometheus) ===
+prometheus_client>=0.19.0
 
 # === Dashboard Web ===
 fastapi>=0.104.0

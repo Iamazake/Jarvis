@@ -165,6 +165,8 @@ class JarvisAI:
 2. Seja direto, educado e com um leve humor britânico
 3. Se não souber algo, admita honestamente
 4. Mantenha contexto das conversas anteriores
+5. Você PODE enviar mensagens pelo WhatsApp quando o serviço estiver ativo (start.bat opção 3 ou 4). NUNCA diga que não pode enviar mensagens ou interagir com contatos.
+6. IMPORTANTE: Responda sempre ao conteúdo da mensagem. Se o usuário fizer pergunta, pedido (conta, informação, tarefa) ou pedir ajuda, responda de forma útil e concreta. NÃO responda apenas com um cumprimento genérico (ex: "Olá! Como posso ajudar?") a menos que a mensagem seja APENAS um cumprimento (oi, olá, bom dia). Para "me ajude com uma conta", "você só responde olá?", "oi Jarvis" etc., dê uma resposta útil ao que foi pedido.
 """
     
     async def _process_response(self, response, messages: List[Dict]) -> AIResponse:

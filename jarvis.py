@@ -53,8 +53,8 @@ async def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Exemplos:
-    python jarvis.py                    # Inicia CLI interativo (legado)
-    python jarvis.py --mcp              # Inicia com sistema MCP (NOVO!)
+    python jarvis.py                    # Inicia CLI com MCP (padrão)
+    python jarvis.py --legado           # Inicia com Orchestrator/WhatsApp/autopilot
     python jarvis.py --voice            # Inicia com modo de voz
     python jarvis.py "pesquisa python"  # Executa comando único
     python jarvis.py --status           # Mostra status do sistema
@@ -65,7 +65,8 @@ Exemplos:
     parser.add_argument('-v', '--voice', action='store_true', help='Ativa modo de voz')
     parser.add_argument('-s', '--status', action='store_true', help='Mostra status')
     parser.add_argument('-d', '--debug', action='store_true', help='Modo debug')
-    parser.add_argument('-m', '--mcp', action='store_true', help='Usa sistema MCP (recomendado)')
+    parser.add_argument('-m', '--mcp', action='store_true', help='Usa sistema MCP (já é o padrão)')
+    parser.add_argument('-l', '--legado', action='store_true', help='Usa sistema legado (Orchestrator + intents WhatsApp/autopilot)')
     parser.add_argument('--no-color', action='store_true', help='Desativa cores')
     
     args = parser.parse_args()
@@ -74,12 +75,14 @@ Exemplos:
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
     
-    # Usa sistema MCP (novo) ou legado
-    if args.mcp:
+    # Padrão = MCP. Use --legado para o fluxo com Orchestrator/WhatsApp/autopilot.
+    use_legado = args.legado
+    use_mcp = args.mcp or (not use_legado)
+    if use_mcp:
         await run_mcp_mode(args)
         return
     
-    # Sistema legado
+    # Sistema legado (Orchestrator, intent classifier, módulos WhatsApp, autopilot)
     from core.jarvis import Jarvis
     
     # Cria instância
@@ -151,14 +154,19 @@ async def run_mcp_mode(args):
 """)
     
     logger.info("🚀 Iniciando JARVIS com sistema MCP...")
-    
+
+    # Jarvis (Orchestrator + ContextManager) como cérebro de execução: MCP planeja, Orchestrator executa
+    from core.jarvis import Jarvis
+    jarvis = Jarvis()
+    await jarvis.start()
+
     # Importa componentes MCP
     from core.mcp_client import create_mcp_client
     from core.ai_engine import get_ai
-    
-    # Inicializa MCP Client
-    mcp_client = await create_mcp_client()
-    
+
+    # Inicializa MCP Client com jarvis injetado (carrega Jarvis Actions: monitor, autopilot, whatsapp_send, etc.)
+    mcp_client = await create_mcp_client(jarvis=jarvis)
+
     # Inicializa AI Engine com MCP
     ai = get_ai(mcp_client)
     
@@ -240,6 +248,7 @@ async def run_mcp_mode(args):
                 
     finally:
         await mcp_client.stop()
+        await jarvis.stop()
         logger.info("JARVIS encerrado.")
 
 

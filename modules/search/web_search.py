@@ -128,9 +128,9 @@ class WebSearch:
                     raise Exception(f"Brave API error: {resp.status}")
     
     async def _search_duckduckgo(self, query: str, num_results: int) -> str:
-        """Pesquisa usando DuckDuckGo (gratuito)"""
+        """Pesquisa usando DDGS (pacote ddgs, ex-duckduckgo_search)"""
         try:
-            from duckduckgo_search import DDGS
+            from ddgs import DDGS
             
             loop = asyncio.get_event_loop()
             
@@ -159,7 +159,7 @@ class WebSearch:
             return '\n\n'.join(formatted)
             
         except ImportError:
-            raise ImportError("Instale duckduckgo-search: pip install duckduckgo-search")
+            raise ImportError("Instale ddgs: pip install ddgs")
     
     async def search_deep(self, query: str) -> str:
         """

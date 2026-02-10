@@ -50,29 +50,40 @@ class IntentClassifier:
                 r'(?:vai|está|tá)\s+(?:chover|chovendo|faz(?:er)?\s+(?:frio|calor))',
                 r'temperatura\s+(?:em|de|hoje)',
             ],
+            # news: só quando pedido EXPLÍCITO por notícias (nunca fallback para "o que está acontecendo")
             'news': [
                 r'(?:notícias?|news)\s*(?:sobre\s+)?(.+)?',
-                r'(?:o que (?:está|tá) acontecendo|novidades)\s*(?:sobre\s+)?(.+)?',
+                r'(?:últimas?\s+)?notícias?\s*(?:do\s+dia|hoje)?',
+                r'novidades\s*(?:sobre\s+)?(.+)?',
             ],
             
             # === WHATSAPP (verificar antes de search/app_control) ===
+            # Padrões mais específicos primeiro; evita backtracking e facilita manutenção
             'whatsapp_send': [
                 r'(?:avis[ae]|avise)\s+(?:a\s+)?([^\s,]+?)\s+que\s+(.+)',
-                # Com separador explícito (2 grupos: contato + mensagem)
-                r'(?:mandar?|enviar?|mand[ae]|envi[ae])\s+(?:uma\s+|essa\s+)?(?:mensagem|msg|mensagm)\s+(?:para?|pro?|a)\s+([^,]+?)\s*(?:,|\s)+(?:dizendo|falando|que|e\s+(?:fal[ae]|dig[ae]|avis[ae]|acrescen?t[ae]))\s*:?\s*(.+)',
-                # Sem separador (1 grupo: só contato) — evita capturar "sua própria" (negative lookahead)
-                r'(?:mandar?|enviar?|mand[ae]|envi[ae])\s+(?:uma\s+|essa\s+)?(?:mensagem|msg|mensagm)\s+(?:para?|pro?|a)\s+(?!sua\s)(.+)',
-                r'(?:mand[ae]|envi[ae])\s+(?:para?|pro?|a)\s+([^,]+?)\s+(?:dizendo|falando|que|e\s+(?:fal[ae]|dig[ae]))\s*:?\s*(.+)',
+                # "manda mensagem para X dizendo Y" (2 grupos)
+                r'(?:mand[ae]|envi[ae])\s+(?:uma\s+)?(?:mensagem|msg)\s+para\s+([^,]+?)\s+dizendo\s+(.+)',
+                r'(?:mand[ae]|envi[ae])\s+(?:uma\s+)?(?:mensagem|msg)\s+para\s+([^,]+?)\s+falando\s+(.+)',
+                r'(?:mand[ae]|envi[ae])\s+(?:uma\s+)?(?:mensagem|msg)\s+para\s+([^,]+?)\s*,?\s*[:\s]+\s*(.+)',
+                # "envia para X: texto" (2 grupos)
+                r'(?:mand[ae]|envi[ae])\s+para\s+([^,]+?)\s*:\s*(.+)',
+                r'(?:mand[ae]|envi[ae])\s+para\s+([^,]+?)\s+(?:dizendo|falando|que)\s+(.+)',
+                # "para X, manda: texto"
+                r'para\s+([^,]+?)\s*,?\s+(?:mand[ae]|envi[ae])\s*:\s*(.+)',
+                # "responde para X" / "diz para X que Y" (1 ou 2 grupos)
                 r'(?:respond[ae]|responde)\s+(?:para?|pro?)\s+(.+)',
-                r'(?:dig[ae]|fal[ae])\s+(?:para?|pro?|a)\s+(.+?)\s+(?:que\s+)?(.+)',
+                r'(?:dig[ae]|fal[ae])\s+(?:para?|pro?|a)\s+(.+?)\s+que\s+(.+)',
+                r'(?:dig[ae]|fal[ae])\s+(?:para?|pro?|a)\s+(.+)',
+                # "manda/envia mensagem para X" (1 grupo; evita "sua própria")
+                r'(?:mand[ae]|envi[ae])\s+(?:uma\s+)?(?:mensagem|msg)\s+(?:para?|pro?|a)\s+(?!sua\s)(.+)',
                 r'(?:mandar?|enviar?)\s+(?:para?|pro?|a)\s+(.+)',
-                # Monte/crie/faça mensagem (sua própria, se apresentando) para X — evita app_control
-                r'(?:quero\s+que\s+(?:vc\s+|você\s+)?)(?:monte|mont[ae]|crie|cri[ae]|faç[ae]|faça|envie|envi[ae])\s+(?:a\s+|uma\s+)?(?:sua\s+própria\s+)?(?:mensagem\s+)?(?:para\s+)?(.+?)(?=\s+se\s+apresentando|\s+e\s+se\s+|\s*,|$)',
-                r'(?:quero\s+que\s+(?:vc\s+|você\s+)?)(?:monte|mont[ae]|crie|cri[ae]|faç[ae]|faça|envie|envi[ae])\s+(?:a\s+|uma\s+)?(?:sua\s+própria\s+)?(?:mensagem\s+)?(?:para\s+)?(.+)',
+                # Monte/crie mensagem para X (apresentando)
+                r'(?:quero\s+que\s+(?:vc\s+|você\s+)?)(?:monte|mont[ae]|crie|cri[ae]|faç[ae]|faça|envie|envi[ae])\s+(?:uma\s+)?(?:mensagem\s+)?(?:para\s+)?(.+?)(?=\s+se\s+apresentando|\s+e\s+se\s+|\s*,|$)',
+                r'(?:quero\s+que\s+(?:vc\s+|você\s+)?)(?:monte|mont[ae]|crie|cri[ae]|faç[ae]|faça|envie|envi[ae])\s+(?:uma\s+)?(?:mensagem\s+)?(?:para\s+)?(.+)',
                 r'(?:monte|mont[ae]|crie|cri[ae]|faç[ae]|faça)\s+(?:uma\s+)?(?:sua\s+)?mensagem\s+(?:se\s+apresentando\s+)?(?:para\s+)?(.+?)(?=\s+se\s+|\s+e\s+|\s*,|$)',
                 r'(?:monte|mont[ae]|crie|cri[ae]|faç[ae]|faça)\s+(?:uma\s+)?(?:sua\s+)?mensagem\s+(?:para\s+)?(.+)',
-                r'(?:envie|envi[ae])\s+(?:uma\s+)?(?:sua\s+)?(?:própria\s+)?mensagem\s+(?:sua\s+própria\s+)?(?:se\s+apresentando|falando\s+suas\s+funções)\s+(?:para\s+)?(.+?)(?=\s+e\s+|\s*,|$)',
-                r'(?:envie|envi[ae])\s+(?:uma\s+)?(?:sua\s+)?(?:própria\s+)?mensagem\s+(?:sua\s+própria\s+)?(?:se\s+apresentando|falando\s+suas\s+funções)\s+(?:para\s+)?(.+)',
+                r'(?:envie|envi[ae])\s+(?:uma\s+)?(?:sua\s+)?(?:própria\s+)?mensagem\s+(?:se\s+apresentando|falando\s+suas\s+funções)\s+(?:para\s+)?(.+?)(?=\s+e\s+|\s*,|$)',
+                r'(?:envie|envi[ae])\s+(?:uma\s+)?(?:sua\s+)?(?:própria\s+)?mensagem\s+(?:se\s+apresentando|falando\s+suas\s+funções)\s+(?:para\s+)?(.+)',
                 r'(?:faç[ae]|faça)\s+(?:uma\s+)?mensagem\s+.+?(?:depois\s+)?(?:envie|envia)\s+(?:essa\s+)?(?:mensagem\s+)?para\s+([^,]+?)(?:\s*\.|$|\s+e\s+)',
                 r'(?:faç[ae]|faça)\s+(?:uma\s+)?mensagem\s+.+?\s+para\s+([^,]+?)(?:\s*\.|$|\s+,)',
             ],
@@ -95,6 +106,7 @@ class IntentClassifier:
             'whatsapp_monitor': [
                 r'(?:monitor[ae]r?|monitore)\s+(?:o\s+)?contato\s+(.+?)(?=\s+e\s+|\s+caso\s+|\s+quando\s+|,|$)',
                 r'(?:monitor[ae]r?|monitore)\s+(?:o\s+)?contato\s+(.+)',
+                r'(?:monitor[ae]r?|monitore)\s+(?:a\s+)(?!conversa)(\S+(?:\s+\S+)*?)(?:\s*\.|$|\s+e\s+|\s+quando\s+|\s+caso\s+)',  # "monitore a tchuchuca"
                 r'(?:monitor[ae]r?|monitore)\s+(?:a\s+)?conversa\s+(?:d[eo]|da)?\s*(?:contato\s+)?(.+?)(?=\s+caso\s+|\s+e\s+|\s+quando\s+|,|$)',
                 r'(?:fic[ae]r?|ficar)\s+monitorando\s+(?:a\s+)?conversa\s+(?:d[eo]|da)?\s*(.+?)(?=\s+caso\s+|\s+e\s+|\s+quando\s+|,|$)',
                 r'(?:monitor[ae]r?|monitore)\s+(?:a\s+)?conversa\s+(?:d[eo]|da)?\s*(?:contato\s+)?(.+)',
@@ -105,6 +117,47 @@ class IntentClassifier:
                 r'(?:respond[ae]|responde)\s+(?:para?|pro?)\s+(?:ele|ela|dele|dela)',
                 r'(?:respond[ae]|responde)\s+(?:à|a)\s+(?:última\s+)?mensagem\s+(?:d[eo]|da)\s+(.+)',
                 r'responder\s+(?:à|a)\s+(?:última\s+)?mensagem\s+(?:de\s+)?(.+?)(?:\s+de\s+maneira|\s*\.|$|\s+dizendo)',
+            ],
+            # Autopilot: "converse com X", "caso ela mande mensagem entretenha", "quando mandar responda"
+            'whatsapp_autoreply_enable': [
+                r'converse\s+com\s+(?:o\s+)?contato\s+(.+)',
+                r'(?:entretenha|entretém|entretem)\s+(?:ela|ele)\s*(?:\.|$)',
+                r'caso\s+(?:ela|ele|.+\s+)\s+(?:mand[ae]|envi[ae])\s+(?:mensagem\s+)?[,:]?\s*(?:você\s+)?(?:responda|entretém|converse|entretenha)',
+                r'quando\s+(?:ela|ele|.+\s+)\s+(?:mand[ae]|envi[ae])\s+(?:mensagem\s+)?[,:]?\s*(?:você\s+)?(?:responda|entretém|converse|entretenha)',
+                r'se\s+(?:ela|ele|.+\s+)\s+(?:mand[ae]|envi[ae])\s+(?:mensagem\s+)?[,:]?\s*(?:você\s+)?(?:responda|entretém|converse|entretenha)',
+            ],
+            'whatsapp_autoreply_disable': [
+                r'pare\s+de\s+responder\s+(?:a\s+|para\s+)?(.+)',
+                r'desativ[ae]\s+autopilot\s+(?:para\s+)?(.+)',
+                r'(?:não\s+)?responda\s+mais\s+(?:a\s+)?(.+)',
+                r'pare\s+(?:o\s+)?autopilot\s+(?:para\s+)?(.+)',
+            ],
+            'whatsapp_autopilot_status': [
+                r'status\s+(?:do\s+)?autopilot',
+                r'status\s+autocopilot',
+                r'quem\s+(?:está\s+)?no\s+autopilot',
+                r'autopilot\s+ativ(?:os?|ado)',
+            ],
+            'whatsapp_autopilot_set_tone': [
+                r'(?:mud[ae]|troque?|troca)\s+(?:o\s+)?tom\s+(?:do\s+)?(?:contato\s+)?(.+?)\s+para\s+(profissional|fofinho|formal|informal)',
+                r'tom\s+(?:do\s+)?(?:contato\s+)?(.+?)\s*[=:]\s*(profissional|fofinho|formal|informal)',
+                r'autopilot\s+(?:do\s+)?(.+?)\s*:\s*(profissional|fofinho|formal|informal)',
+                r'quero\s+(?:que\s+)?(?:mud[ae]|troque?)\s+(?:o\s+)?tom\s+(?:dele|dela|do\s+contato)\s+para\s+(profissional|fofinho|formal|informal)',
+                r'(?:mud[ae]|troque?)\s+(?:o\s+)?tom\s+(?:dele|dela)\s+para\s+(profissional|fofinho|formal|informal)',
+            ],
+            'whatsapp_monitor_status': [
+                r'status\s+(?:de\s+)?monitoramento',
+                r'monitor\s+status',
+                r'status\s+monitor',
+                r'quem\s+(?:está\s+)?(?:sendo\s+)?monitorad[ao]',
+            ],
+            'whatsapp_autoreply_enable': [
+                r'autopilot\s+para\s+(.+)',
+                r'converse\s+com\s+(?:o\s+)?contato\s+(.+)',
+                r'(?:entretenha|entretém|entretem)\s+(?:ela|ele)\s*(?:\.|$)',
+                r'caso\s+(?:ela|ele|.+\s+)\s+(?:mand[ae]|envi[ae])\s+(?:mensagem\s+)?[,:]?\s*(?:você\s+)?(?:responda|entretém|converse|entretenha|fale)',
+                r'quando\s+(?:ela|ele|.+\s+)\s+(?:mand[ae]|envi[ae])\s+(?:mensagem\s+)?[,:]?\s*(?:você\s+)?(?:responda|entretém|converse|entretenha|fale)',
+                r'se\s+(?:ela|ele|.+\s+)\s+(?:mand[ae]|envi[ae])\s+(?:mensagem\s+)?[,:]?\s*(?:você\s+)?(?:responda|entretém|converse|entretenha|fale)',
             ],
             
             # === AGENDA/LEMBRETES ===
@@ -126,6 +179,20 @@ class IntentClassifier:
                 r'(?:cri[ae]|faz|abr[ae])\s+(?:um[a]?\s+)?(?:pasta|arquivo|diretório)\s+(.+)',
                 r'(?:organiz[ae]|mov[ae]|copi[ae]|delet[ae]|apag[ae])\s+(?:os?\s+)?(?:arquivos?|pastas?)\s+(.+)',
                 r'(?:list[ae]|mostr[ae])\s+(?:os?\s+)?(?:arquivos?|pastas?)\s+(?:em\s+)?(.+)?',
+            ],
+            # Diagnóstico do PC (antes de app_control para não cair em "comando de aplicativo")
+            'system_info': [
+                r'(?:meu\s+)?pc\s+(?:aqui\s+)?(?:está|fica|tá)\s+lento',
+                r'computador\s+(?:está|fica|tá)\s+lento',
+                r'(?:está|tá|fica)\s+travando',
+                r'lentidão\s+(?:no\s+)?(?:pc|computador)?',
+                r'(?:consegue\s+)?verific[ae]r?\s+(?:o\s+)?que\s+(?:está|tá)\s+deixando\s+(?:meu\s+)?(?:pc|computador)\s+lento',
+                r'(?:consegue\s+)?verific[ae]r?\s+para\s+mim\s+(?:o\s+)?que',
+                r'o\s+que\s+(?:está|tá)\s+deixando\s+(?:meu\s+)?pc\s+lento',
+                r'detalhes?\s+sobre\s+(?:meu\s+)?pc',
+                r'(?:qual\s+)?(?:o\s+)?uso\s+de\s+(?:cpu|memória|ram|disco)',
+                r'(?:status|info)\s+(?:do\s+)?sistema',
+                r'(?:status|info)\s+(?:do\s+)?(?:meu\s+)?pc',
             ],
             'system_command': [
                 r'(?:execut[ae]|rod[ae]|run)\s+(?:o\s+)?(?:comando\s+)?(.+)',
@@ -223,6 +290,57 @@ class IntentClassifier:
         message = message.strip()
         context = context or {}
         
+        # 0a. PC lento / desempenho → system_info (antes de news ou qualquer outro)
+        if self._is_pc_performance_message(message):
+            return Intent(type='system_info', confidence=0.95, entities={})
+
+        # 0a1. "Cancele o monitoramento" / "pare de monitorar" → whatsapp_monitor_disable (não autoreply_disable)
+        monitor_disable_patterns = [
+            (r'cancele\s+(?:o\s+)?monitoramento\s+(?:d[eo]\s+)?(.+?)(?:\s*\.|$)', 1),
+            (r'cancel[ae]\s+(?:o\s+)?monitoramento\s+(?:d[eo]\s+)?(.+?)(?:\s*\.|$)', 1),
+            (r'pare\s+de\s+monitorar\s+(?:o\s+)?(?:contato\s+)?(.+?)(?:\s*\.|$)', 1),
+            (r'desativ[ae]\s+(?:o\s+)?monitoramento\s+(?:d[eo]\s+)?(.+?)(?:\s*\.|$)', 1),
+            (r'(?:não\s+)?monitore\s+mais\s+(?:o\s+)?(.+?)(?:\s*\.|$)', 1),
+            (r'cancele\s+o\s+monitor\s+(?:d[eo]\s+)?(.+?)(?:\s*\.|$)', 1),
+        ]
+        for pat, group in monitor_disable_patterns:
+            m = re.search(pat, message, re.I)
+            if m:
+                contact = (m.group(group).strip() if group and m.lastindex and m.lastindex >= group else '').strip()
+                if not contact and context.get('last_monitored_contact'):
+                    contact = (context.get('last_monitored_contact') or '').strip()
+                return Intent(type='whatsapp_monitor_disable', confidence=0.95, entities={'contact': contact} if contact else {})
+
+        # 0a2. "Pare de responder" / "desativar autopilot" → SEMPRE whatsapp_autoreply_disable (nunca whatsapp_send)
+        disable_patterns = [
+            (r'para\s+de\s+responder\s+(?:a[s]?\s+)?(?:as\s+mensagens\s+de\s+)?(.+)?', 1),
+            (r'pare\s+de\s+responder\s+(?:a[s]?\s+|para\s+)?(.+)?', 1),
+            (r'não\s+responda\s+(?:mais\s+)?(?:a\s+)?(.+)?', 1),
+            (r'desativ[ae]\s+autopilot\s+(?:para\s+)?(.+)?', 1),
+            (r'pare\s+(?:o\s+)?autopilot\s+(?:para\s+)?(.+)?', 1),
+            (r'stop\s+autopilot', 0),
+        ]
+        for pat, group in disable_patterns:
+            m = re.search(pat, message, re.I)
+            if m:
+                contact = (m.group(group).strip() if group and m.lastindex and m.lastindex >= group else '').strip()
+                return Intent(type='whatsapp_autoreply_disable', confidence=0.95, entities={'contact': contact} if contact else {})
+        
+        # 0b. Condicional "caso/quando X mande mensagem, responda/entretém/fale" → autoreply, NUNCA whatsapp_send
+        if self._is_conditional_autoreply(message):
+            entities = {}
+            contact = self._extract_contact_from_conditional_autoreply(message, context)
+            if contact:
+                entities['contact'] = contact
+            self._apply_context_to_entities(entities, 'whatsapp_autoreply_enable', context)
+            return Intent(type='whatsapp_autoreply_enable', confidence=0.9, entities=entities)
+
+        # 0c. Correção de contato: só "tchuchuca" / "Douglas" após erro de monitor → repetir monitor com esse nome
+        if context.get('last_intent') == 'whatsapp_monitor' and message and len(message.split()) <= 3:
+            msg_lower = message.lower()
+            if not any(v in msg_lower for v in ('envie', 'manda', 'monitore', 'pare', 'status', 'quando', 'caso')):
+                return Intent(type='whatsapp_monitor', confidence=0.85, entities={'contact': message.strip()})
+        
         # 0. Envio de mensagem domina: verbo de envio + "mensagem"/"msg"/"texto" → whatsapp_send (antes de app_control)
         # Exceto se usuário nega ou quer conversar: "não quero enviar", "quero conversar contigo"
         if self._has_send_message_intent(message) and not self._has_negation_or_want_chat(message):
@@ -233,14 +351,16 @@ class IntentClassifier:
             self._apply_context_to_entities(entities, 'whatsapp_send', context)
             return Intent(type='whatsapp_send', confidence=0.85, entities=entities)
 
-        # 1. Tenta match por padrão (rápido) — WhatsApp primeiro para não cair em search/app_control
+        # 1. Tenta match por padrão (rápido) — autoreply antes de send; system_info antes de app_control
         priority_order = [
+            'whatsapp_autoreply_enable', 'whatsapp_autoreply_disable', 'whatsapp_autopilot_status',
+            'whatsapp_autopilot_set_tone', 'whatsapp_monitor_status', 'whatsapp_monitor_disable',
             'whatsapp_send', 'whatsapp_check', 'whatsapp_read', 'whatsapp_monitor', 'whatsapp_reply',
             'capabilities',
             'reminder', 'alarm', 'schedule', 'sentiment', 'productivity',
             'backup', 'security', 'translation', 'automation',
             'conversation_question',
-            'search', 'weather', 'news', 'file_operation', 'system_command', 'app_control',
+            'search', 'weather', 'news', 'file_operation', 'system_info', 'system_command', 'app_control',
             'greeting', 'thanks', 'farewell',
         ]
         for intent_type in priority_order:
@@ -316,6 +436,11 @@ class IntentClassifier:
             'whatsapp_read': ['contact'],
             'whatsapp_monitor': ['contact'],
             'whatsapp_reply': ['contact'],
+            'whatsapp_autoreply_enable': ['contact'],
+            'whatsapp_autoreply_disable': ['contact'],
+            'whatsapp_autopilot_set_tone': ['contact', 'tone'],
+            'whatsapp_monitor_status': [],
+            'whatsapp_monitor_disable': ['contact'],
             'reminder': ['task', 'time'],
             'alarm': ['time'],
             'file_operation': ['target'],
@@ -329,12 +454,12 @@ class IntentClassifier:
                 entities[names[i]] = group.strip()
         
         # Para WhatsApp: limpa contato (cláusulas, conteúdo/tom, stop-phrases)
-        if intent_type in ('whatsapp_send', 'whatsapp_read', 'whatsapp_monitor', 'whatsapp_reply') and entities.get('contact'):
+        if intent_type in ('whatsapp_send', 'whatsapp_read', 'whatsapp_monitor', 'whatsapp_monitor_disable', 'whatsapp_reply', 'whatsapp_autoreply_enable', 'whatsapp_autoreply_disable') and entities.get('contact'):
             c = self._trim_contact_entity(entities['contact'])
             c = self._trim_contact_content(c)
             c = c.rstrip('?.,;')
             entities['contact'] = c
-        if intent_type in ('whatsapp_send', 'whatsapp_read', 'whatsapp_monitor') and entities.get('contact'):
+        if intent_type in ('whatsapp_send', 'whatsapp_read', 'whatsapp_monitor', 'whatsapp_monitor_disable', 'whatsapp_autoreply_enable', 'whatsapp_autoreply_disable') and entities.get('contact'):
             entities['contact'] = self._strip_contact_stop_phrases(entities['contact'])
         if intent_type == 'whatsapp_reply' and entities.get('contact'):
             entities['contact'] = self._strip_contact_stop_phrases(entities['contact'])
@@ -452,6 +577,60 @@ class IntentClassifier:
                 break
         return contact.strip() if contact else ''
 
+    def _is_pc_performance_message(self, message: str) -> bool:
+        """True se a mensagem fala de PC/computador lento, travando, memória, etc. → system_info."""
+        msg = (message or '').lower()
+        device = ('pc', 'computador', 'computador.')
+        performance = (
+            'lento', 'travando', 'lentidão', 'lentidao', 'engasgando', 'memória cheia',
+            'memoria cheia', 'ram cheia', 'cpu alta', 'disco 100%', 'disco cheio',
+            'está lento', 'tá lento', 'fica lento', 'deixando lento', 'deixando meu pc',
+        )
+        has_device = any(d in msg for d in device)
+        has_perf = any(p in msg for p in performance)
+        return has_device and has_perf
+
+    def _is_conditional_autoreply(self, message: str) -> bool:
+        """True se a frase tem condicional (caso/quando/se) + mandar mensagem + responda/entretém/converse/fale."""
+        msg = (message or '').lower()
+        if not re.search(r'\b(caso|quando|se)\b', msg):
+            return False
+        if not re.search(r'\b(mand[ae]|envi[ae]|mandar|enviar)\b.*\b(mensagem\s+)?', msg):
+            return False
+        return bool(re.search(r'\b(responda|entretém|entretem|converse|entretenha|fale|fala)\b', msg))
+
+    PRONOUNS_CONTACT = ('ela', 'ele', 'dele', 'dela', 'ele/a', 'ela/ele')
+
+    def _extract_contact_from_conditional_autoreply(self, message: str, context: Dict) -> str:
+        """Extrai contato de 'caso ela mande', 'quando tchuchuca mandar', 'monitore o contato tchuchuca quando ela mandar', etc.
+        Nome explícito na mensagem tem prioridade absoluta; só usa contexto para pronomes (ela/ele)."""
+        msg = (message or '').strip()
+        def is_pronoun(s):
+            return (s or '').strip().lower() in self.PRONOUNS_CONTACT
+
+        # 1) "monitore o contato X quando/caso/se" → X tem prioridade (evita usar last_monitored errado)
+        m = re.search(r'(?:monitor[ae]r?|monitore)\s+(?:o\s+)?contato\s+(\S+(?:\s+\S+)*?)\s+(?=quando|caso|se|\s+e\s+|$)', msg, re.I)
+        if m:
+            name = m.group(1).strip()
+            if not is_pronoun(name):
+                return name
+        # 2) "converse com o contato X"
+        m = re.search(r'converse\s+com\s+(?:o\s+)?contato\s+(\S+(?:\s+\S+)*?)(?:\s*\.|$|\s+e\s+)', msg, re.I)
+        if m:
+            name = m.group(1).strip()
+            if not is_pronoun(name):
+                return name
+        # 3) "caso/quando/se X mande" → X só se não for pronome
+        m = re.search(r'(?:caso|quando|se)\s+([^\s,]+?)\s+(?:mand[ae]|envi[ae])', msg, re.I)
+        if m:
+            name = m.group(1).strip()
+            if not is_pronoun(name):
+                return name
+        # 4) "caso ela / quando ela / se ele" → active_target (alvo ativo único), não lista de monitorados
+        if re.search(r'\b(caso|quando|se)\s+(ela|ele)\b', msg, re.I):
+            return (context.get('active_target_name') or context.get('last_monitored_contact') or context.get('last_contact') or '').strip()
+        return ''
+
     # Referências que indicam "contato que pedi pra monitorar" → last_monitored_contact
     MONITORED_REF_PHRASES = (
         'que eu pedi pra você monitorar', 'que eu pedi pra vc monitorar',
@@ -462,7 +641,7 @@ class IntentClassifier:
 
     def _apply_context_to_entities(self, entities: Dict, intent_type: str, context: Dict):
         """Preenche contato a partir do contexto (last_contact, last_monitored_contact)."""
-        if intent_type not in ('whatsapp_read', 'whatsapp_monitor', 'whatsapp_send', 'whatsapp_reply'):
+        if intent_type not in ('whatsapp_read', 'whatsapp_monitor', 'whatsapp_monitor_disable', 'whatsapp_send', 'whatsapp_reply', 'whatsapp_autoreply_enable', 'whatsapp_autoreply_disable', 'whatsapp_autopilot_set_tone'):
             return
         contact = (entities.get('contact') or '').strip().lower()
         # Referências a contato monitorado
@@ -472,10 +651,10 @@ class IntentClassifier:
                 if monitored:
                     entities['contact'] = monitored
                 return
-        # Pronomes (ela/ele) → last_monitored_contact ou last_contact
+        # Pronomes (ela/ele) → active_target_name ou last_monitored_contact ou last_contact
         refs = ('dele', 'dela', 'ele', 'ela', 'dele.', 'dela.', 'nele', 'nela')
         if not contact or contact in refs:
-            last = (context.get('last_monitored_contact') or context.get('last_contact') or '').strip()
+            last = (context.get('active_target_name') or context.get('last_monitored_contact') or context.get('last_contact') or '').strip()
             if last:
                 entities['contact'] = last
     
