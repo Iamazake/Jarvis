@@ -138,6 +138,13 @@ class IntentClassifier:
                 r'quem\s+(?:está\s+)?no\s+autopilot',
                 r'autopilot\s+ativ(?:os?|ado)',
             ],
+            'whatsapp_autopilot_summary': [
+                r'resumo\s+(?:do\s+)?autopilot(?:\s+do\s+)?(?:(.+?))?\s*(hoje|24h|\d+\s*mensagens?)?$',
+                r'resumo\s+autopilot\s+(hoje|24h)',
+                r'resumo\s+autopilot\s+do\s+(.+)',
+                r'resumo\s+autopilot\s+(?:últimas?\s+)?(\d+)\s*mensagens?',
+                r'resumo\s+autopilot\s*$',
+            ],
             'whatsapp_autopilot_set_tone': [
                 r'(?:mud[ae]|troque?|troca)\s+(?:o\s+)?tom\s+(?:do\s+)?(?:contato\s+)?(.+?)\s+para\s+(profissional|fofinho|formal|informal)',
                 r'tom\s+(?:do\s+)?(?:contato\s+)?(.+?)\s*[=:]\s*(profissional|fofinho|formal|informal)',
@@ -354,7 +361,7 @@ class IntentClassifier:
         # 1. Tenta match por padrão (rápido) — autoreply antes de send; system_info antes de app_control
         priority_order = [
             'whatsapp_autoreply_enable', 'whatsapp_autoreply_disable', 'whatsapp_autopilot_status',
-            'whatsapp_autopilot_set_tone', 'whatsapp_monitor_status', 'whatsapp_monitor_disable',
+            'whatsapp_autopilot_summary', 'whatsapp_autopilot_set_tone', 'whatsapp_monitor_status', 'whatsapp_monitor_disable',
             'whatsapp_send', 'whatsapp_check', 'whatsapp_read', 'whatsapp_monitor', 'whatsapp_reply',
             'capabilities',
             'reminder', 'alarm', 'schedule', 'sentiment', 'productivity',
@@ -438,6 +445,7 @@ class IntentClassifier:
             'whatsapp_reply': ['contact'],
             'whatsapp_autoreply_enable': ['contact'],
             'whatsapp_autoreply_disable': ['contact'],
+            'whatsapp_autopilot_summary': ['contact', 'period', 'last_n'],
             'whatsapp_autopilot_set_tone': ['contact', 'tone'],
             'whatsapp_monitor_status': [],
             'whatsapp_monitor_disable': ['contact'],
@@ -641,7 +649,7 @@ class IntentClassifier:
 
     def _apply_context_to_entities(self, entities: Dict, intent_type: str, context: Dict):
         """Preenche contato a partir do contexto (last_contact, last_monitored_contact)."""
-        if intent_type not in ('whatsapp_read', 'whatsapp_monitor', 'whatsapp_monitor_disable', 'whatsapp_send', 'whatsapp_reply', 'whatsapp_autoreply_enable', 'whatsapp_autoreply_disable', 'whatsapp_autopilot_set_tone'):
+        if intent_type not in ('whatsapp_read', 'whatsapp_monitor', 'whatsapp_monitor_disable', 'whatsapp_send', 'whatsapp_reply', 'whatsapp_autoreply_enable', 'whatsapp_autoreply_disable', 'whatsapp_autopilot_summary', 'whatsapp_autopilot_set_tone'):
             return
         contact = (entities.get('contact') or '').strip().lower()
         # Referências a contato monitorado

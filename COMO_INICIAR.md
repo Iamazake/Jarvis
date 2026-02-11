@@ -108,6 +108,16 @@ Resposta esperada do /queue: `{"success":true,"status":"enqueued","message_id":"
 
 ---
 
+## Variáveis de ambiente (shutdown e voz)
+
+| Variável | Efeito |
+|----------|--------|
+| **JARVIS_DISABLE_VOICE=1** | Não carrega o módulo de voz (TTS/STT/Listener). Use para evitar travamento no shutdown quando o processo é chamado pela API (run_jarvis_message): o pyttsx3 usa COM no Windows e o destrutor pode bloquear. **Teste A/B:** rode com `set JARVIS_DISABLE_VOICE=1` e confira se o processo encerra após `jarvis_stop_end` sem Ctrl+C. |
+| JARVIS_DIAG=1 | Logs de diagnóstico (tasks/threads, autopilot) em `debug_agent.log`. |
+| JARVIS_TIMING_LOG=0 | Desliga os [timing] no stderr. |
+
+---
+
 ## Resumo
 
 | O que você quer | O que fazer |

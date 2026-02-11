@@ -9,6 +9,7 @@ Versão: 3.0.0
 
 import asyncio
 import logging
+import os
 from datetime import datetime
 from typing import Optional, Dict, Any, Callable
 from pathlib import Path
@@ -49,6 +50,9 @@ class Jarvis:
         self.wake_word = self.config.get('JARVIS_WAKE_WORD', 'jarvis')
         self.language = self.config.get('JARVIS_LANGUAGE', 'pt-BR')
         
+        # Task do loop de autonomia (cancelada explicitamente em stop())
+        self._autonomy_task: Optional[asyncio.Task] = None
+        
         logger.info(f"🤖 {self.name} inicializado")
     
     async def start(self):
@@ -64,8 +68,14 @@ class Jarvis:
         # Inicializa o orquestrador (carrega todos os módulos)
         await self.orchestrator.start()
         
-        # Inicia loop de autonomia (ações proativas)
-        asyncio.create_task(self._autonomy_loop())
+        # Inicia loop de autonomia (ações proativas); evita duplicata se start() chamado 2x
+        existing = getattr(self, '_autonomy_task', None)
+        if existing is not None and not existing.done():
+            logger.warning("Loop de autonomia já em execução, não criando outra task")
+        else:
+            self._autonomy_task = asyncio.create_task(
+                self._autonomy_loop(), name="jarvis_autonomy_loop"
+            )
         
         logger.info(f"✅ {self.name} pronto!")
         return self
@@ -78,11 +88,32 @@ class Jarvis:
         logger.info(f"🛑 Parando {self.name}...")
         self._running = False
         
+        # Cancelar e aguardar task de autonomia com timeout para shutdown determinístico
+        task = getattr(self, '_autonomy_task', None)
+        if task is not None:
+            task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+            except asyncio.CancelledError:
+                pass
+            except asyncio.TimeoutError:
+                logger.warning("Timeout aguardando _autonomy_loop encerrar (2s)")
+        
         await self.orchestrator.stop()
+        
+        # Diagnóstico opcional: tasks pendentes no loop (JARVIS_DIAG=1)
+        if os.getenv('JARVIS_DIAG', '').strip().lower() in ('1', 'true', 'yes'):
+            try:
+                loop = asyncio.get_running_loop()
+                pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+                if pending:
+                    logger.debug("Tasks pendentes após stop: %s", [t.get_name() for t in pending])
+            except Exception as e:
+                logger.debug("Dump tasks falhou: %s", e)
         
         logger.info(f"👋 {self.name} finalizado")
 
-    def apply_out_meta(self, out_meta: Dict) -> None:
+    async def apply_out_meta(self, out_meta: Dict) -> None:
         """
         Aplica metadados de saída ao contexto (usado por process() e por handlers MCP).
         Atualiza pending_plan, suggested_send, last_contact, autopilot, etc.
@@ -144,7 +175,14 @@ class Jarvis:
             ap = out_meta["disable_autopilot"]
             contact = (ap.get("contact") or "").strip()
             if contact:
-                self.context.disable_autopilot(contact)
+                ok, removed_info = self.context.disable_autopilot(contact)
+                if ok and removed_info and removed_info.get("jid") and removed_info.get("created_at"):
+                    try:
+                        await asyncio.wait_for(self._generate_summary_on_disable(removed_info), timeout=3.0)
+                    except asyncio.TimeoutError:
+                        logger.warning("Timeout ao gerar resumo ao desativar autopilot (jid=%s)", removed_info.get("jid"))
+                    except Exception as e:
+                        logger.warning("Falha ao gerar resumo ao desativar autopilot: %s", e)
         if out_meta.get("update_autopilot_tone"):
             ut = out_meta["update_autopilot_tone"]
             jid = (ut.get("jid") or "").strip()
@@ -203,10 +241,16 @@ class Jarvis:
             else:
                 response, out_meta = result, {}
 
-            self.apply_out_meta(out_meta)
+            await self.apply_out_meta(out_meta)
 
             # Nunca responder "não tenho capacidade" em fluxos WhatsApp; substituir por mensagem útil
             response = self._sanitize_whatsapp_response(response)
+
+            if response is None and os.getenv('JARVIS_DIAG', '').strip().lower() in ('1', 'true', 'yes'):
+                logger.info(
+                    "no_response: pipeline returned None intent=%s",
+                    out_meta.get('last_intent', ''),
+                )
 
             # Adiciona resposta ao contexto (e ao histórico por JID quando WhatsApp)
             self.context.add_message('assistant', response, source, metadata)
@@ -220,6 +264,28 @@ class Jarvis:
             logger.error(f"Erro ao processar: {e}")
             await self._emit('on_error', str(e))
             return f"Desculpe, ocorreu um erro: {str(e)}"
+
+    async def _generate_summary_on_disable(self, removed_info: Dict) -> None:
+        """Chama API para gerar resumo do período em que o autopilot esteve ativo (fire-and-forget)."""
+        try:
+            import aiohttp
+            api_url = os.getenv("JARVIS_API_URL", "http://127.0.0.1:5000").rstrip("/")
+            period_start = removed_info.get("created_at")
+            if hasattr(period_start, "strftime"):
+                period_start = period_start.strftime("%Y-%m-%d %H:%M:%S")
+            period_end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            headers = {}
+            if os.getenv("JARVIS_INTERNAL_SECRET"):
+                headers["X-Jarvis-Internal"] = os.getenv("JARVIS_INTERNAL_SECRET")
+            async with aiohttp.ClientSession() as session:
+                await session.post(
+                    f"{api_url}/internal/generate-autopilot-summary",
+                    json={"jid": removed_info["jid"], "period_start": period_start, "period_end": period_end},
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                )
+        except Exception as e:
+            logger.warning("Falha ao gerar resumo ao desativar autopilot: %s", e)
     
     @staticmethod
     def _sanitize_whatsapp_response(response: str) -> str:

@@ -14,7 +14,16 @@ const {
 import qrcode from 'qrcode-terminal';
 import pino from 'pino';
 import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
 import Fastify from 'fastify';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const JARVIS_ROOT = join(__dirname, '..', '..');
+const JARVIS_DATA_DIR = (process.env.JARVIS_DATA_DIR || join(JARVIS_ROOT, 'data')).replace(/\/$/, '');
+const CONTEXT_STATE_PATH = join(JARVIS_DATA_DIR, 'context_state.json');
+const AUTOPILOT_CACHE_TTL_MS = 60000; // 60s - não chamar HTTP
+let autopilotCache = { data: null, at: 0 };
 
 // ========================================
 // Configurações
@@ -30,7 +39,7 @@ const CONFIG = {
   },
   contactsFile: './contacts_cache.json',
   autoReply: true,  // MODO AUTÔNOMO ATIVADO
-  ownerNumber: '5511988669454'  // Seu número (não responde a si mesmo)
+  ownerNumber: '5511985751247'  // Seu número (dono do JARVIS; não responde a si mesmo)
 };
 
 function parsePositiveInt(value, fallback) {
@@ -46,6 +55,114 @@ const WA_QUEUE_TIMEOUT_MS = parsePositiveInt(process.env.WA_QUEUE_TIMEOUT_MS, 20
 const API_HEALTHCHECK_INTERVAL_MS = parsePositiveInt(process.env.WA_API_HEALTHCHECK_INTERVAL_MS, 15000);
 const API_HEALTHCHECK_TIMEOUT_MS = parsePositiveInt(process.env.WA_API_HEALTHCHECK_TIMEOUT_MS, 2500);
 const API_SHORT_CIRCUIT_MS = parsePositiveInt(process.env.WA_API_SHORT_CIRCUIT_MS, 20000);
+// MySQL pool (conversation_events inbound) - opcional: se mysql2 falhar, serviço sobe sem persistir inbound
+let mysqlPool = null;
+const MYSQL_ENABLED = !!(process.env.MYSQL_HOST && process.env.MYSQL_DATABASE);
+if (MYSQL_ENABLED) {
+  try {
+    const mysql = (await import('mysql2/promise')).default;
+    mysqlPool = mysql.createPool({
+      host: process.env.MYSQL_HOST || '127.0.0.1',
+      port: Number(process.env.MYSQL_PORT || 3306),
+      user: process.env.MYSQL_USER || 'root',
+      password: process.env.MYSQL_PASSWORD || '',
+      database: process.env.MYSQL_DATABASE || 'jarvis_db',
+      waitForConnections: true,
+      connectionLimit: 10,
+      queueLimit: 0
+    });
+    console.log('MySQL (WhatsApp): pool conectado para conversation_events');
+  } catch (e) {
+    console.warn('MySQL (WhatsApp) não disponível – histórico inbound não será salvo:', e.message);
+  }
+}
+
+function normalizeJid(jid) {
+  if (!jid || typeof jid !== 'string' || !jid.includes('@')) return '';
+  let raw = String(jid).trim().toLowerCase();
+  if (raw.endsWith('@lid') && raw.includes(':')) {
+    const number = raw.split(':')[0].replace(/^\+/, '');
+    if (/^\d+$/.test(number)) raw = number + '@s.whatsapp.net';
+  }
+  return raw;
+}
+
+/** Lê autopilot status localmente do context_state.json (cache 60s). Sem HTTP. */
+function getAutopilotStatusFromContextState(conversationJid) {
+  const normalized = normalizeJid(conversationJid);
+  if (!normalized) return false;
+  const now = Date.now();
+  const cacheHit = autopilotCache.data && (now - autopilotCache.at) <= AUTOPILOT_CACHE_TTL_MS;
+  if (!cacheHit) {
+    autopilotCache = { data: null, at: now };
+    if (!existsSync(CONTEXT_STATE_PATH)) {
+      console.warn(JSON.stringify({ event: 'context_state_read', path: CONTEXT_STATE_PATH, file_missing: true, jid: normalized, enabled_found: false }));
+      return false;
+    }
+    try {
+      autopilotCache.data = JSON.parse(readFileSync(CONTEXT_STATE_PATH, 'utf8'));
+      autopilotCache.at = now;
+    } catch (e) {
+      console.warn(JSON.stringify({ event: 'context_state_read', path: CONTEXT_STATE_PATH, error: e.message, jid: normalized, enabled_found: false }));
+      return false;
+    }
+  }
+  const data = autopilotCache.data;
+  if (!data) return false;
+  const autopilot = data.autopilot_contacts || {};
+  const nowDate = new Date().toISOString();
+  for (const [key, entry] of Object.entries(autopilot)) {
+    if (!entry.enabled) continue;
+    const keyNorm = key.includes('@') ? normalizeJid(key) : key.toLowerCase();
+    if (keyNorm === normalized) {
+      const expires = entry.expires_at;
+      if (expires && new Date(expires).toISOString() < nowDate) continue;
+      if (!cacheHit) console.log(JSON.stringify({ event: 'context_state_read', path: CONTEXT_STATE_PATH, jid: normalized, enabled_found: true, cache_hit: false }));
+      return true;
+    }
+  }
+  const alias = data.autopilot_alias || {};
+  for (const [, storedJid] of Object.entries(alias)) {
+    if (normalizeJid(storedJid) === normalized) {
+      if (!cacheHit) console.log(JSON.stringify({ event: 'context_state_read', path: CONTEXT_STATE_PATH, jid: normalized, enabled_found: true, cache_hit: false }));
+      return true;
+    }
+  }
+  if (!cacheHit) console.log(JSON.stringify({ event: 'context_state_read', path: CONTEXT_STATE_PATH, jid: normalized, enabled_found: false, cache_hit: false }));
+  return false;
+}
+
+async function insertConversationEventInbound(jidNormalized, messageId, text, ts, mode, meta) {
+  if (!mysqlPool) return;
+  const mid = messageId || `in-${Date.now()}`;
+  try {
+    await mysqlPool.execute(
+      `INSERT INTO conversation_events (jid_normalized, message_id, direction, text, ts, mode, meta)
+       VALUES (?, ?, 'in', ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE text = VALUES(text), mode = VALUES(mode), meta = VALUES(meta)`,
+      [jidNormalized, mid, (text || '').slice(0, 65535), ts, mode, meta ? JSON.stringify(meta) : null]
+    );
+    console.log(JSON.stringify({ event: 'event_saved', jid: jidNormalized, message_id: mid, direction: 'in', mode }));
+  } catch (err) {
+    console.warn(JSON.stringify({ event: 'event_save_failed', jid: jidNormalized, message_id: mid, error: err.message }));
+  }
+}
+
+async function insertConversationEventOutbound(jidNormalized, messageId, text, ts, mode, meta) {
+  if (!mysqlPool) return;
+  const mid = messageId || `out-${Date.now()}`;
+  try {
+    await mysqlPool.execute(
+      `INSERT INTO conversation_events (jid_normalized, message_id, direction, text, ts, mode, meta)
+       VALUES (?, ?, 'out', ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE text = VALUES(text), mode = VALUES(mode), meta = VALUES(meta)`,
+      [jidNormalized, mid, (text || '').slice(0, 65535), ts, mode, meta ? JSON.stringify(meta) : null]
+    );
+    console.log(JSON.stringify({ event: 'event_saved', jid: jidNormalized, message_id: mid, direction: 'out', mode, latency_ms: meta?.latency_ms }));
+  } catch (err) {
+    console.warn(JSON.stringify({ event: 'event_save_failed', jid: jidNormalized, message_id: mid, error: err.message }));
+  }
+}
 
 // Logger silencioso (erros de init queries são esperados)
 const logger = pino({ 
@@ -302,6 +419,20 @@ async function connectWhatsApp() {
       }
       if (!text) return;
       if (!CONFIG.autoReply) return;
+      const conversationJid = sender;
+      const jidNormalized = normalizeJid(conversationJid);
+      const autopilotOn = getAutopilotStatusFromContextState(conversationJid);
+      const tsDate = new Date((msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000);
+      const ts = tsDate.toISOString().slice(0, 19).replace('T', ' ') + '.' + String(tsDate.getMilliseconds()).padStart(3, '0');
+      const meta = {
+        from_jid: senderJid,
+        display_name: pushName,
+        is_group: isGroup,
+        raw_message_type: hasMedia ? (mediaType || 'unknown') : 'conversation',
+        quoted_message_id: msg.message?.extendedTextMessage?.contextInfo?.stanzaId || null,
+        wa_ts_raw: msg.messageTimestamp ?? null
+      };
+      await insertConversationEventInbound(jidNormalized, messageId, text, ts, autopilotOn ? 'autopilot' : 'manual', meta);
       try {
         const apiAvailable = await ensureApiAvailable();
         if (!apiAvailable) {
@@ -699,6 +830,7 @@ async function notifyPythonPresence(jid, status, pushName) {
   });
 }
 
+/** Retorna { key } do Baileys (key.id = provider_message_id). */
 async function sendMessage(to, text) {
   if (!sock || !isConnected) {
     throw new Error('WhatsApp não conectado');
@@ -711,8 +843,9 @@ async function sendMessage(to, text) {
       await new Promise((r) => setTimeout(r, MIN_SEND_INTERVAL_MS - elapsed));
     }
   }
-  await sock.sendMessage(to, { text });
+  const result = await sock.sendMessage(to, { text });
   lastSendTimeByJid[jid] = Date.now();
+  return result;
 }
 
 function formatUptime() {
@@ -859,9 +992,9 @@ fastify.post('/contacts/import', async (request, reply) => {
   };
 });
 
-// Enviar mensagem (por número)
+// Enviar mensagem (por número). Aceita mode, job_id, reply_to_message_id para gravar outbound.
 fastify.post('/send', async (request, reply) => {
-  const { to, message } = request.body || {};
+  const { to, message, mode, job_id, reply_to_message_id } = request.body || {};
   
   if (!to || !message) {
     return reply.status(400).send({ error: 'to e message são obrigatórios' });
@@ -871,15 +1004,26 @@ fastify.post('/send', async (request, reply) => {
     return reply.status(503).send({ error: 'WhatsApp não conectado' });
   }
   
+  const startedAt = Date.now();
   try {
-    // Formatar número se necessário
     let jid = to;
     if (!jid.includes('@')) {
       jid = jid.replace(/\D/g, '') + '@s.whatsapp.net';
     }
-    
-    await sendMessage(jid, message);
-    return { success: true, to: jid };
+    const jidNorm = normalizeJid(jid);
+    const result = await sendMessage(jid, message);
+    const providerMessageId = result?.key?.id || null;
+    const messageId = providerMessageId || (job_id ? `job-${job_id}` : `out-${Date.now()}`);
+    const ts = new Date().toISOString().slice(0, 23).replace('T', ' ');
+    const outMode = (mode === 'autopilot' || mode === 'system') ? mode : 'manual';
+    const meta = {
+      job_id: job_id ?? null,
+      provider_message_id: providerMessageId,
+      reply_to_message_id: reply_to_message_id ?? null,
+      latency_ms: Date.now() - startedAt
+    };
+    await insertConversationEventOutbound(jidNorm, messageId, String(message).slice(0, 65535), ts, outMode, meta);
+    return { success: true, to: jid, message_id: providerMessageId || messageId };
   } catch (error) {
     return reply.status(500).send({ error: error.message });
   }

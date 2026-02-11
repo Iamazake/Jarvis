@@ -9,6 +9,7 @@ Versão: 3.0.0
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -16,6 +17,14 @@ from collections import deque, OrderedDict
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
+# ── Storage path único: JARVIS_DATA_DIR (obrigatório para consistência com Node/WhatsApp) ──
+# Defina JARVIS_DATA_DIR no .env (ex: C:\YAmazake\jarvis\data) para que Python e Node leiam o mesmo context_state.json.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_DATA_DIR = Path(os.getenv('JARVIS_DATA_DIR', '').strip() or str(_REPO_ROOT / 'data')).resolve()
+CONTEXT_STATE_FILENAME = 'context_state.json'
+# Log de diagnóstico do agente (jarvis/debug_agent.log quando cwd=jarvis)
+DEBUG_AGENT_LOG = Path(__file__).resolve().parent.parent / "debug_agent.log"
 
 
 class LRUCache(OrderedDict):
@@ -58,8 +67,8 @@ class ContextManager:
         self.max_history = max_history
         self.context_ttl = timedelta(minutes=context_ttl_minutes)
         
-        # Persistência: data/context_state.json (diretório jarvis ou workspace)
-        self._persistence_file = Path(__file__).resolve().parent.parent / "data" / "context_state.json"
+        # Persistência: usa _DATA_DIR (env JARVIS_DATA_DIR ou <repo>/data) — path absoluto único
+        self._persistence_file = _DATA_DIR / CONTEXT_STATE_FILENAME
         
         # Histórico de mensagens (FIFO)
         self.messages: deque = deque(maxlen=max_history)
@@ -115,10 +124,18 @@ class ContextManager:
         self._last_interaction: datetime = datetime.now()
         
         self._load_state()
+        logger.debug("ContextManager storage_path=%s", self._persistence_file)
+
+    @property
+    def storage_path(self) -> str:
+        """Caminho absoluto do arquivo de persistência (útil para diagnóstico)."""
+        return str(self._persistence_file)
     
     def _load_state(self):
         """Carrega monitored_contacts, last_messages e autopilot_contacts do disco."""
+        path = str(self._persistence_file)
         if not self._persistence_file.exists():
+            logger.warning("context_state_read path=%s file_missing=1 (assumindo OFF para todos)", path)
             return
         try:
             data = json.loads(self._persistence_file.read_text(encoding="utf-8"))
@@ -132,6 +149,7 @@ class ContextManager:
                         val = {**val, "timestamp": datetime.now()}
                 self._last_message_by_contact[key] = val
             now = datetime.now()
+            enabled_jids = []
             for key, val in data.get("autopilot_contacts", {}).items():
                 expires = val.get("expires_at")
                 if isinstance(expires, str):
@@ -141,6 +159,9 @@ class ContextManager:
                         expires = now
                 if expires and expires > now:
                     self._autopilot_contacts[key] = {**val, "expires_at": expires}
+                    if val.get("enabled", True):
+                        exp_iso = expires.isoformat() if hasattr(expires, 'isoformat') else str(expires) if expires else None
+                        enabled_jids.append((key, exp_iso))
             self._autopilot_alias = dict(data.get("autopilot_alias", {}))
             self._last_monitored_jid = data.get("last_monitored_jid") or None
             self._active_target_jid = data.get("active_target_jid") or None
@@ -150,28 +171,35 @@ class ContextManager:
             for jid, msgs in data.get("conversation_by_jid", {}).items():
                 if isinstance(msgs, list) and msgs:
                     self._conversation_history_per_jid[jid] = msgs[-self._max_conversation_per_jid:]
+            logger.info("context_state_read path=%s enabled_jids=%s", path, enabled_jids)
         except (json.JSONDecodeError, OSError) as e:
-            logger.warning("Não foi possível carregar context_state: %s", e)
+            logger.warning("Não foi possível carregar context_state path=%s: %s", path, e)
     
     def _save_state(self):
         """Persiste monitored_contacts e last_messages em disco."""
+        path = str(self._persistence_file)
         try:
             self._persistence_file.parent.mkdir(parents=True, exist_ok=True)
+            autopilot_ser = {}
+            enabled_list = []
+            for k, v in self._autopilot_contacts.items():
+                exp = v.get("expires_at")
+                autopilot_ser[k] = {
+                    "enabled": v.get("enabled", True),
+                    "tone": v.get("tone", "fofinho"),
+                    "expires_at": exp,
+                    "created_at": v.get("created_at"),
+                    "display_name": v.get("display_name"),
+                }
+                if v.get("enabled", True):
+                    exp_iso = exp.isoformat() if hasattr(exp, 'isoformat') and exp else str(exp) if exp else None
+                    enabled_list.append((k, exp_iso))
             data = {
                 "monitored_contacts": self._monitored_contacts,
                 "last_monitored_jid": self._last_monitored_jid,
                 "active_target_jid": self._active_target_jid,
                 "active_target_name": self._active_target_name,
-                "autopilot_contacts": {
-                    k: {
-                        "enabled": v.get("enabled", True),
-                        "tone": v.get("tone", "fofinho"),
-                        "expires_at": v.get("expires_at"),
-                        "created_at": v.get("created_at"),
-                        "display_name": v.get("display_name"),
-                    }
-                    for k, v in self._autopilot_contacts.items()
-                },
+                "autopilot_contacts": autopilot_ser,
                 "autopilot_alias": self._autopilot_alias,
                 "contact_jid_by_name": self._contact_jid_by_name,
                 "last_messages": {
@@ -193,8 +221,9 @@ class ContextManager:
                 json.dumps(data, ensure_ascii=False, default=str),
                 encoding="utf-8",
             )
+            logger.info("context_state_write path=%s jid_enabled=%s", path, enabled_list)
         except OSError as e:
-            logger.warning("Não foi possível salvar context_state: %s", e)
+            logger.warning("Não foi possível salvar context_state path=%s: %s", path, e)
     
     def add_message(self, role: str, content: str, source: str = 'cli',
                     metadata: Dict = None):
@@ -385,10 +414,31 @@ class ContextManager:
         raw = identifier.strip()
         key_lower = raw.lower()
         if "@" in raw:
-            return self._normalize_jid(raw) or None
+            out = self._normalize_jid(raw) or None
+            # #region agent log
+            try:
+                import json as _j; open(DEBUG_AGENT_LOG, 'a', encoding='utf-8').write(_j.dumps({"location": "context_manager._autopilot_lookup_key", "message": "jid_lookup", "data": {"identifier": identifier[:80], "key_found": (out[:50] if out else None)}, "timestamp": __import__("time").time() * 1000, "hypothesisId": "H1_H4"}) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            return out
         if key_lower in self._autopilot_alias:
-            return self._autopilot_alias[key_lower]
-        return key_lower if key_lower in self._autopilot_contacts else None
+            out = self._autopilot_alias[key_lower]
+            # #region agent log
+            try:
+                import json as _j; open(DEBUG_AGENT_LOG, 'a', encoding='utf-8').write(_j.dumps({"location": "context_manager._autopilot_lookup_key", "message": "alias_hit", "data": {"identifier": identifier[:80], "key_found": (out[:50] if out else None)}, "timestamp": __import__("time").time() * 1000, "hypothesisId": "H1"}) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            return out
+        out = key_lower if key_lower in self._autopilot_contacts else None
+        # #region agent log
+        try:
+            import json as _j; open(DEBUG_AGENT_LOG, 'a', encoding='utf-8').write(_j.dumps({"location": "context_manager._autopilot_lookup_key", "message": "name_lookup", "data": {"identifier": identifier[:80], "key_lower": key_lower[:50], "key_found": (out[:50] if out else None), "in_contacts": key_lower in self._autopilot_contacts}, "timestamp": __import__("time").time() * 1000, "hypothesisId": "H1"}) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        return out
 
     def enable_autopilot(
         self,
@@ -398,7 +448,8 @@ class ContextManager:
         ttl_minutes: int = 120,
     ) -> None:
         """Ativa autopilot para um contato por JID (identidade estável). Nome só para exibição/alias.
-        Se receber só nome (sem @) e já tivermos JID em contact_jid_by_name, grava por JID para match futuro."""
+        Se receber só nome (sem @) e já tivermos JID em contact_jid_by_name, grava por JID para match futuro.
+        Para grupos (@g.us): autopilot só é ativado quando o usuário pedir explicitamente (ex.: ative autopilot para o grupo X)."""
         if jid and "@" not in jid:
             existing_jid = self.get_jid_for_contact(jid)
             if existing_jid:
@@ -424,20 +475,23 @@ class ContextManager:
         logger.info("Autopilot ativado para %s (jid=%s, tom=%s, TTL=%s min)", display_name or key, key, tone, ttl_minutes)
         self._save_state()
 
-    def disable_autopilot(self, contact: str) -> bool:
-        """Desativa autopilot para um contato (JID ou nome). Retorna True se estava ativo."""
+    def disable_autopilot(self, contact: str) -> tuple:
+        """Desativa autopilot para um contato (JID ou nome). Retorna (True, removed_info) se estava ativo, (False, None) caso contrário. removed_info = {jid, created_at} para gerar resumo."""
         key = self._autopilot_lookup_key(contact)
         if not key:
             key = self._normalize_contact_key(contact)
         if key and key in self._autopilot_contacts:
+            entry = self._autopilot_contacts[key]
+            created_at = entry.get("created_at")
+            removed_info = {"jid": key, "created_at": created_at} if ("@" in key) else None
             del self._autopilot_contacts[key]
             for k, v in list(self._autopilot_alias.items()):
                 if v == key:
                     del self._autopilot_alias[k]
             self._save_state()
             logger.info("Autopilot desativado para %s", contact)
-            return True
-        return False
+            return True, removed_info
+        return False, None
 
     def get_autopilot(self, contact: str) -> Optional[Dict[str, Any]]:
         """Retorna config do autopilot para o contato (JID ou nome) ou None se desativado/expirado."""
@@ -454,6 +508,30 @@ class ContextManager:
             return None
         return entry
 
+    def refresh_autopilot_ttl(self, jid: str, ttl_minutes: int = 120) -> bool:
+        """
+        Renova o TTL do autopilot para o JID quando o contato envia mensagem.
+        Evita que o autopilot expire no meio da conversa (evidência: debug log return_false_after_jid_loop
+        com key_found mas get_autopilot retornando None por entrada já expirada).
+        Retorna True se havia entrada e foi renovada.
+        """
+        if not jid or "@" not in jid:
+            return False
+        key = self._normalize_jid(jid)
+        if not key or key not in self._autopilot_contacts:
+            return False
+        entry = self._autopilot_contacts[key]
+        if not entry.get("enabled"):
+            return False
+        now = datetime.now()
+        expires = entry.get("expires_at")
+        if isinstance(expires, datetime) and expires < now:
+            return False
+        entry["expires_at"] = now + timedelta(minutes=ttl_minutes)
+        self._save_state()
+        logger.debug("Autopilot TTL renovado para %s (+%s min)", key[:30], ttl_minutes)
+        return True
+
     def is_autopilot_enabled_for(self, identifier: str) -> bool:
         """
         True se autopilot está ativo para este contato (JID ou nome).
@@ -462,12 +540,35 @@ class ContextManager:
         (ex.: Tchuchuca e Dhyellen são a mesma pessoa com dois nomes).
         Também considera match por substring: autopilot "Dhyellen" bate com pushName "Dhyellen Moreira".
         """
-        if self.get_autopilot(identifier) is not None:
+        # #region agent log
+        _debug_log = str(DEBUG_AGENT_LOG)
+        # #endregion
+        direct = self.get_autopilot(identifier)
+        if direct is not None:
+            # #region agent log
+            try:
+                import json as _j; open(_debug_log, 'a', encoding='utf-8').write(_j.dumps({"location": "context_manager.is_autopilot_enabled_for", "message": "direct_hit", "data": {"identifier": (identifier or "")[:80], "has_at": "@" in (identifier or "")}, "timestamp": __import__("time").time() * 1000, "hypothesisId": "H1"}) + "\n")
+            except Exception:
+                pass
+            # #endregion
             return True
-        if not identifier or "@" not in identifier:
+        has_at = "@" in (identifier or "")
+        if not identifier or not has_at:
+            # #region agent log
+            try:
+                import json as _j; open(_debug_log, 'a', encoding='utf-8').write(_j.dumps({"location": "context_manager.is_autopilot_enabled_for", "message": "return_false_no_jid_path", "data": {"identifier": (identifier or "")[:80], "reason": "identifier_has_no_at"}, "timestamp": __import__("time").time() * 1000, "hypothesisId": "H1"}) + "\n")
+            except Exception:
+                pass
+            # #endregion
             return False
         jid_norm = self._normalize_jid(identifier)
         if not jid_norm:
+            # #region agent log
+            try:
+                import json as _j; open(_debug_log, 'a', encoding='utf-8').write(_j.dumps({"location": "context_manager.is_autopilot_enabled_for", "message": "return_false_jid_norm_empty", "data": {"identifier": identifier[:80]}, "timestamp": __import__("time").time() * 1000, "hypothesisId": "H4"}) + "\n")
+            except Exception:
+                pass
+            # #endregion
             return False
         for name, stored_jid in self._contact_jid_by_name.items():
             if self._normalize_jid(stored_jid) != jid_norm:
@@ -480,7 +581,19 @@ class ContextManager:
                     continue
                 if ap_key in name or name in ap_key:
                     if self.get_autopilot(ap_key) is not None:
+                        # #region agent log
+                        try:
+                            import json as _j; open(DEBUG_AGENT_LOG, 'a', encoding='utf-8').write(_j.dumps({"location": "context_manager.is_autopilot_enabled_for", "message": "substring_match", "data": {"identifier": identifier[:80], "name": name[:50], "ap_key": ap_key[:50]}, "timestamp": __import__("time").time() * 1000, "hypothesisId": "H1"}) + "\n")
+                        except Exception:
+                            pass
+                        # #endregion
                         return True
+        # #region agent log
+        try:
+            import json as _j; open(_debug_log, 'a', encoding='utf-8').write(_j.dumps({"location": "context_manager.is_autopilot_enabled_for", "message": "return_false_after_jid_loop", "data": {"identifier": identifier[:80], "jid_norm": (jid_norm or "")[:50]}, "timestamp": __import__("time").time() * 1000, "hypothesisId": "H1_H4"}) + "\n")
+        except Exception:
+            pass
+        # #endregion
         return False
 
     def list_autopilot(self) -> List[Dict[str, Any]]:
@@ -549,6 +662,12 @@ class ContextManager:
             if key:
                 self._contact_jid_by_name[key] = normalized_jid
                 logger.debug("contact_seen: %s -> %s", key, normalized_jid)
+                # #region agent log
+                try:
+                    import json as _j; open(DEBUG_AGENT_LOG, 'a', encoding='utf-8').write(_j.dumps({"location": "context_manager.update_contact_seen", "message": "contact_seen", "data": {"jid": normalized_jid[:50], "display_name": key[:50]}, "timestamp": __import__("time").time() * 1000, "hypothesisId": "H3"}) + "\n")
+                except Exception:
+                    pass
+                # #endregion
         self._save_state()
 
     def get_jid_for_contact(self, name: str) -> Optional[str]:

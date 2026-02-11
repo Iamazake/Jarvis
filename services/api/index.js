@@ -12,7 +12,8 @@ import cors from '@fastify/cors';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
+import mysql from 'mysql2/promise';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -80,6 +81,140 @@ const API_QUEUE_CONCURRENCY = Math.max(1, Number(process.env.API_QUEUE_CONCURREN
 const API_WHATSAPP_SERVICE_URL = (process.env.API_WHATSAPP_SERVICE_URL || 'http://127.0.0.1:3001').replace(/\/$/, '');
 const WHATSAPP_SEND_TIMEOUT_MS = Number(process.env.WHATSAPP_SEND_TIMEOUT_MS || 8000);
 
+// JARVIS data dir (context_state.json) - mesmo path que Python
+const JARVIS_DATA_DIR = process.env.JARVIS_DATA_DIR ? process.env.JARVIS_DATA_DIR.trim() : join(rootDir, 'data');
+const CONTEXT_STATE_PATH = join(JARVIS_DATA_DIR, 'context_state.json');
+
+// MySQL pool (conversation_events outbound + autopilot_summaries)
+let mysqlPool = null;
+const MYSQL_ENABLED = !!(process.env.MYSQL_HOST && process.env.MYSQL_DATABASE);
+if (MYSQL_ENABLED) {
+  try {
+    mysqlPool = mysql.createPool({
+      host: process.env.MYSQL_HOST || '127.0.0.1',
+      port: Number(process.env.MYSQL_PORT || 3306),
+      user: process.env.MYSQL_USER || 'root',
+      password: process.env.MYSQL_PASSWORD || '',
+      database: process.env.MYSQL_DATABASE || 'jarvis_db',
+      waitForConnections: true,
+      connectionLimit: 10,
+      queueLimit: 0
+    });
+  } catch (e) {
+    console.warn('MySQL pool não inicializado:', e.message);
+  }
+}
+
+function normalizeJid(jid) {
+  if (!jid || typeof jid !== 'string' || !jid.includes('@')) return '';
+  let raw = jid.trim().toLowerCase();
+  if (raw.endsWith('@lid') && raw.includes(':')) {
+    const number = raw.split(':')[0].replace(/^\+/, '');
+    if (/^\d+$/.test(number)) raw = number + '@s.whatsapp.net';
+  }
+  return raw;
+}
+
+function getAutopilotStatusFromContextState(jid) {
+  const normalized = normalizeJid(jid);
+  if (!normalized) return { enabled: false };
+  if (!existsSync(CONTEXT_STATE_PATH)) return { enabled: false };
+  try {
+    const data = JSON.parse(readFileSync(CONTEXT_STATE_PATH, 'utf8'));
+    const autopilot = data.autopilot_contacts || {};
+    const now = new Date().toISOString();
+    for (const [key, entry] of Object.entries(autopilot)) {
+      if (!entry.enabled) continue;
+      const keyNorm = key.includes('@') ? normalizeJid(key) : key.toLowerCase();
+      if (keyNorm === normalized) {
+        const expires = entry.expires_at;
+        if (expires && new Date(expires).toISOString() < now) continue;
+        return { enabled: true };
+      }
+    }
+    const alias = data.autopilot_alias || {};
+    for (const [nameKey, storedJid] of Object.entries(alias)) {
+      if (normalizeJid(storedJid) === normalized) return { enabled: true };
+    }
+  } catch (e) {
+    // ignore
+  }
+  return { enabled: false };
+}
+
+async function insertConversationEventOutbound(jidNormalized, messageId, text, mode) {
+  if (!mysqlPool) return;
+  const ts = new Date();
+  const mid = messageId || `out-${ts.getTime()}-${Math.random().toString(36).slice(2, 9)}`;
+  try {
+    await mysqlPool.execute(
+      `INSERT INTO conversation_events (jid_normalized, message_id, direction, text, ts, mode, meta)
+       VALUES (?, ?, 'out', ?, ?, ?, NULL)
+       ON DUPLICATE KEY UPDATE text = VALUES(text), mode = VALUES(mode), ts = VALUES(ts)`,
+      [jidNormalized, mid, (text || '').slice(0, 65535), ts, mode || 'autopilot']
+    );
+    fastify.log.info({ msg: 'conversation_event saved', jid: jidNormalized, message_id: mid, direction: 'out', mode: mode || 'autopilot' });
+  } catch (err) {
+    fastify.log.warn({ msg: 'conversation_event insert failed', jid: jidNormalized, error: err.message });
+  }
+}
+
+function getAdminJid() {
+  const admin = (process.env.JARVIS_ADMIN_JID || '').trim();
+  if (admin && admin.includes('@')) return normalizeJid(admin);
+  const owner = (process.env.JARVIS_OWNER_NUMBER || '').trim().replace(/\D/g, '');
+  if (owner) return owner + '@s.whatsapp.net';
+  return null;
+}
+
+function isInternalRequest(request) {
+  const ip = request.ip || request.headers['x-forwarded-for'] || '';
+  const isLocal = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1' || String(ip).startsWith('127.') || String(ip).startsWith('::1');
+  const internalSecret = process.env.JARVIS_INTERNAL_SECRET || '';
+  const hasInternalHeader = internalSecret && request.headers['x-jarvis-internal'] === internalSecret;
+  return isLocal || hasInternalHeader;
+}
+
+async function fetchEventsForSummary(jidNormalized, periodStart, periodEnd, limitN = null) {
+  if (!mysqlPool) return [];
+  try {
+    const limit = limitN != null && Number.isInteger(limitN) && limitN > 0 ? Math.min(limitN, 500) : null;
+    const order = limit ? 'DESC' : 'ASC';
+    let sql = `SELECT direction, text, ts FROM conversation_events WHERE jid_normalized = ? AND mode = 'autopilot' AND ts >= ? AND ts <= ? ORDER BY ts ${order}`;
+    if (limit) sql += ` LIMIT ${limit}`;
+    const [rows] = await mysqlPool.execute(sql, [jidNormalized, periodStart, periodEnd]);
+    const list = rows || [];
+    return limit ? list.reverse() : list;
+  } catch (e) {
+    fastify.log.warn({ msg: 'fetchEventsForSummary failed', jid: jidNormalized, error: e.message });
+    return [];
+  }
+}
+
+function buildSummaryFromEvents(events) {
+  const inMsgs = events.filter(r => r.direction === 'in').map(r => (r.text || '').trim()).filter(Boolean);
+  const outMsgs = events.filter(r => r.direction === 'out').map(r => (r.text || '').trim()).filter(Boolean);
+  const topics = [...inMsgs.slice(-5), ...outMsgs.slice(-5)].filter(Boolean).slice(0, 10);
+  let md = `**Contexto:** Conversa com ${inMsgs.length} mensagem(ns) recebida(s) e ${outMsgs.length} resposta(s) do autopilot.\n\n`;
+  md += `**Tópicos (últimas trocas):**\n`;
+  topics.forEach(t => { md += `- ${t.slice(0, 120)}${t.length > 120 ? '...' : ''}\n`; });
+  md += `\n**Pendências:**\n- (Nenhuma identificada automaticamente)\n`;
+  return md;
+}
+
+async function saveAutopilotSummary(jidNormalized, periodStart, periodEnd, summaryMd, highlightsJson = null) {
+  if (!mysqlPool) return;
+  try {
+    await mysqlPool.execute(
+      `INSERT INTO autopilot_summaries (jid_normalized, period_start, period_end, summary_md, highlights_json) VALUES (?, ?, ?, ?, ?)`,
+      [jidNormalized, periodStart, periodEnd, summaryMd, highlightsJson ? JSON.stringify(highlightsJson) : null]
+    );
+    fastify.log.info({ msg: 'autopilot_summary saved', jid: jidNormalized, period_end: periodEnd });
+  } catch (err) {
+    fastify.log.warn({ msg: 'autopilot_summary insert failed', jid: jidNormalized, error: err.message });
+  }
+}
+
 const jobQueue = [];
 const seenMessageIds = new Map(); // message_id -> timestamp (para dedupe do ACK)
 const queueInFlightMessageIds = new Set(); // worker já pegou o job
@@ -121,7 +256,7 @@ async function processPythonAI(message, jid, displayName, timeoutMs = WEBHOOK_PR
 
     const python = spawn(pythonCmd, args, {
       cwd: rootDir,
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8' }
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8', JARVIS_DATA_DIR }
     });
 
     let stdout = '';
@@ -150,13 +285,25 @@ async function processPythonAI(message, jid, displayName, timeoutMs = WEBHOOK_PR
       done = true;
       clearTimeout(timeout);
       const timing = extractTimingLines(stderr);
+      // Robustez: parse apenas a PRIMEIRA linha JSON válida do stdout
+      // (ignora linhas de log acidentais que possam ter ido pro stdout)
       if (code === 0) {
-        try {
-          const result = JSON.parse(stdout.trim());
-          resolve({ ...result, __timing: timing });
-        } catch (e) {
-          // Se não for JSON, retorna como texto
+        const lines = stdout.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+        let parsed = null;
+        for (const line of lines) {
+          if (!line.startsWith('{')) continue;
+          try {
+            parsed = JSON.parse(line);
+            break;
+          } catch { /* não é JSON, tentar próxima */ }
+        }
+        if (parsed) {
+          resolve({ ...parsed, __timing: timing });
+        } else if (stdout.trim()) {
+          // Fallback: se nenhuma linha era JSON, retorna como texto
           resolve({ response: stdout.trim(), cached: false, __timing: timing });
+        } else {
+          resolve({ action: 'ignore', response: '', reason: 'empty_stdout', __timing: timing });
         }
       } else {
         reject(new Error(tailText(stderr) || `Python exited with code ${code}`));
@@ -199,10 +346,22 @@ function isConnectionError(err) {
   return ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET'].includes(code) || message.includes('econnrefused') || message.includes('enotfound') || message.includes('eai_again');
 }
 
-async function sendToWhatsApp(jid, message) {
+/**
+ * @param {string} jid
+ * @param {string} message
+ * @param {{ mode?: string, job_id?: string, reply_to_message_id?: string }} [opts]
+ * @returns {Promise<{ ok: boolean, message_id?: string }>}
+ */
+async function sendToWhatsApp(jid, message, opts = {}) {
   const url = `${API_WHATSAPP_SERVICE_URL}/send`;
   const timeoutMs = WHATSAPP_SEND_TIMEOUT_MS;
-  const body = JSON.stringify({ to: jid, message });
+  const body = JSON.stringify({
+    to: jid,
+    message,
+    mode: opts.mode || undefined,
+    job_id: opts.job_id || undefined,
+    reply_to_message_id: opts.reply_to_message_id || undefined
+  });
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -213,15 +372,38 @@ async function sendToWhatsApp(jid, message) {
       signal: controller.signal
     });
     clearTimeout(timeoutId);
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`HTTP ${res.status} ${text.slice(0, 80)}`);
-    }
-    return { ok: true };
+    const text = await res.text().catch(() => '');
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${text.slice(0, 80)}`);
+    let data = {};
+    if (text) try { data = JSON.parse(text); } catch (_) {}
+    return { ok: true, message_id: data.message_id };
   } catch (err) {
     clearTimeout(timeoutId);
     throw err;
   }
+}
+
+/**
+ * Policy layer: perguntas sobre status/biografia de pessoa real → resposta fixa (sem alucinação).
+ * Retorna { action: 'reply', response } se aplicar; null para seguir para o LLM.
+ */
+function policyStatusOrBioQuestion(message) {
+  const t = (message || '').toLowerCase().trim();
+  const statusBioPatterns = [
+    /\b(está|ta)\s+(ocupado|livre|disponível|online|offline)\b/,
+    /\b(status|biografia|bio)\s+(de|do|da)\s+\w+/,
+    /\w+\s+está\s+(ocupado|livre|disponível)/,
+    /\b(como|onde)\s+(está|tá)\s+\w+\b/,
+    /\b(está\s+ocupado|está\s+livre)\s*\??\s*$/
+  ];
+  if (statusBioPatterns.some(r => r.test(t))) {
+    return {
+      action: 'reply',
+      response: 'Eu não tenho status em tempo real. Posso mandar uma mensagem perguntando. Quer que eu envie?',
+      reason: 'policy_status_question'
+    };
+  }
+  return null;
 }
 
 /**
@@ -273,6 +455,80 @@ fastify.get('/stats', async (request, reply) => {
 });
 
 /**
+ * GET /internal/autopilot-status?jid=xxx - Lê context_state.json e retorna se autopilot está ON para o JID.
+ * Uso: WhatsApp service antes de gravar inbound. Apenas localhost.
+ */
+fastify.get('/internal/autopilot-status', async (request, reply) => {
+  if (!isInternalRequest(request)) return reply.status(403).send({ error: 'Forbidden' });
+  const jid = (request.query && request.query.jid) || '';
+  const { enabled } = getAutopilotStatusFromContextState(jid);
+  return { enabled };
+});
+
+/**
+ * POST /internal/autopilot-summary - Gera e persiste resumo (com checagem de privacidade).
+ * Requester via header X-Jarvis-Requester-Jid (não confiar no body).
+ * Body: { target_jid, period?: 'hoje'|'24h', last_n?: number }.
+ */
+fastify.post('/internal/autopilot-summary', async (request, reply) => {
+  if (!isInternalRequest(request)) return reply.status(403).send({ error: 'Forbidden' });
+  const requesterRaw = (request.headers && (request.headers['x-jarvis-requester-jid'] || request.headers['X-Jarvis-Requester-Jid'])) || '';
+  const requester = normalizeJid(requesterRaw);
+  const { target_jid, period = '24h', last_n } = request.body || {};
+  const target = normalizeJid(target_jid || '');
+  if (!target) return reply.status(400).send({ error: 'target_jid obrigatório' });
+  const adminJid = getAdminJid();
+  const allowed = (adminJid && requester === adminJid) || requester === target;
+  if (!allowed) {
+    return reply.status(403).send({
+      allowed: false,
+      message: 'Acesso negado: você só pode pedir resumo do seu próprio chat.'
+    });
+  }
+  const now = new Date();
+  let periodStart, periodEnd;
+  if (last_n != null && Number(last_n) > 0) {
+    periodEnd = now.toISOString().slice(0, 19).replace('T', ' ');
+    periodStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
+  } else if (period === 'hoje') {
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    periodStart = start.toISOString().slice(0, 19).replace('T', ' ');
+    periodEnd = now.toISOString().slice(0, 19).replace('T', ' ');
+  } else {
+    const start = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    periodStart = start.toISOString().slice(0, 19).replace('T', ' ');
+    periodEnd = now.toISOString().slice(0, 19).replace('T', ' ');
+  }
+  const events = await fetchEventsForSummary(target, periodStart, periodEnd, last_n != null ? Number(last_n) : null);
+  const summaryMd = events.length === 0
+    ? 'Sem eventos de autopilot no período informado.'
+    : buildSummaryFromEvents(events);
+  if (events.length > 0) await saveAutopilotSummary(target, periodStart, periodEnd, summaryMd);
+  return { allowed: true, summary_md: summaryMd };
+});
+
+/**
+ * POST /internal/generate-autopilot-summary - Gera resumo ao desativar autopilot (sem checagem de privacidade).
+ * Body: { jid, period_start, period_end } (ISO ou YYYY-MM-DD HH:mm:ss).
+ */
+fastify.post('/internal/generate-autopilot-summary', async (request, reply) => {
+  if (!isInternalRequest(request)) return reply.status(403).send({ error: 'Forbidden' });
+  const { jid, period_start, period_end } = request.body || {};
+  const jidNorm = normalizeJid(jid || '');
+  if (!jidNorm || !period_start || !period_end) {
+    return reply.status(400).send({ error: 'jid, period_start e period_end obrigatórios' });
+  }
+  const periodStart = String(period_start).slice(0, 19).replace('T', ' ');
+  const periodEnd = String(period_end).slice(0, 19).replace('T', ' ');
+  const events = await fetchEventsForSummary(jidNorm, periodStart, periodEnd);
+  const summaryMd = events.length === 0
+    ? 'Sem eventos de autopilot no período informado.'
+    : buildSummaryFromEvents(events);
+  if (events.length > 0) await saveAutopilotSummary(jidNorm, periodStart, periodEnd, summaryMd);
+  return { summary_md: summaryMd };
+});
+
+/**
  * Webhook - Recebe mensagens do WhatsApp (Baileys)
  */
 fastify.post('/webhook', async (request, reply) => {
@@ -320,9 +576,14 @@ fastify.post('/webhook', async (request, reply) => {
   }
 
   try {
+    const policyResult = policyStatusOrBioQuestion(message);
+    if (policyResult) {
+      state.stats.processed++;
+      const payload = { success: true, action: 'reply', response: policyResult.response, reason: policyResult.reason };
+      if (messageId) webhookResultCache.set(messageId, { createdAt: Date.now(), result: payload });
+      return payload;
+    }
     fastify.log.info({ msg: 'ANTES processPythonAI', messageId: messageId || '(sem message_id)', jid });
-    // Decisão reply/ignore só via Python (autopilot). Nunca usar quickResponse aqui:
-    // senão responderíamos "Olá!" mesmo com autopilot desativado.
     const result = await processPythonAI(message, jid, displayName, WEBHOOK_PROCESS_TIMEOUT_MS);
     const pythonTiming = Array.isArray(result?.__timing) ? result.__timing : [];
     const elapsedMs = Date.now() - startedAt;
@@ -451,19 +712,26 @@ async function processOneJob(job) {
   fastify.log.info({ msg: 'queue job start', message_id: msgId || '(sem id)', jid });
 
   try {
-    fastify.log.info({ msg: 'python_start', message_id: msgId || '(sem id)', jid });
-    const result = await processPythonAI(message, jid, displayName, WEBHOOK_PROCESS_TIMEOUT_MS);
-    const elapsedMs = Date.now() - startAt;
-    fastify.log.info({ msg: 'python_end', message_id: msgId || '(sem id)', jid, elapsedMs, reason: result?.reason });
+    const policyResult = policyStatusOrBioQuestion(message);
+    let result;
+    if (policyResult) {
+      result = { action: 'reply', response: policyResult.response, reason: policyResult.reason };
+      fastify.log.info({ msg: 'policy_status_question', message_id: msgId || '(sem id)', jid });
+    } else {
+      fastify.log.info({ msg: 'python_start', message_id: msgId || '(sem id)', jid });
+      result = await processPythonAI(message, jid, displayName, WEBHOOK_PROCESS_TIMEOUT_MS);
+      fastify.log.info({ msg: 'python_end', message_id: msgId || '(sem id)', jid, elapsedMs: Date.now() - startAt, reason: result?.reason });
+    }
 
     state.stats.processed++;
 
     if (result?.action === 'reply' && result?.response) {
       fastify.log.info({ msg: 'send_start', message_id: msgId || '(sem id)', jid });
       let lastErr;
+      const outboundMode = result.mode || 'autopilot';
       for (let attempt = 1; attempt <= 2; attempt++) {
         try {
-          await sendToWhatsApp(jid, result.response);
+          await sendToWhatsApp(jid, result.response, { mode: outboundMode, job_id: msgId || `job-${Date.now()}`, reply_to_message_id: msgId || undefined });
           fastify.log.info({ msg: 'send_end', message_id: msgId || '(sem id)', jid, elapsedMs: Date.now() - startAt });
           break;
         } catch (err) {

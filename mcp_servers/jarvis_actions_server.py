@@ -183,7 +183,7 @@ class JarvisActionsServer(MCPServer):
             source=source,
             metadata=metadata,
         )
-        self.jarvis.apply_out_meta(out_meta or {})
+        await self.jarvis.apply_out_meta(out_meta or {})
         return response if isinstance(response, str) else str(response)
 
     async def _whatsapp_monitor(self, contact: str) -> str:

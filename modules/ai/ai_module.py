@@ -126,7 +126,7 @@ Regras:
         # core.ai_engine.JarvisAI (sem src)
         if getattr(self, '_jarvis_ai', None):
             try:
-                r = await self._jarvis_ai.process(message)
+                r = await self._jarvis_ai.process(message, metadata=metadata or {})
                 return r.text if hasattr(r, 'text') else str(r)
             except Exception as e:
                 logger.error("Erro JarvisAI: %s", e)

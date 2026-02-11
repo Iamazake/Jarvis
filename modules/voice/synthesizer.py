@@ -104,15 +104,15 @@ class Synthesizer:
     
     async def speak(self, text: str):
         """
-        Fala o texto
-        
-        Args:
-            text: Texto para sintetizar e falar
+        Fala o texto. Inicializa o engine sob demanda (lazy) para evitar
+        criar COM/pyttsx3 em run_jarvis_message quando não há fala.
         """
+        if not self._initialized:
+            await self.initialize()
         if not self._initialized:
             logger.warning("Synthesizer não inicializado")
             return
-        
+
         try:
             if self._use_elevenlabs:
                 await self._speak_elevenlabs(text)
@@ -201,6 +201,22 @@ class Synthesizer:
         
         if self._engine:
             self._engine.setProperty('rate', self.speed)
+
+    def stop(self):
+        """
+        Desconecta e zera referências ao engine TTS (COM/pyttsx3) para evitar
+        travamento no shutdown: comtypes.client._events.__del__ pode bloquear
+        se eventos COM não forem liberados antes do processo encerrar.
+        """
+        if self._engine is not None:
+            try:
+                if hasattr(self._engine, 'stop'):
+                    self._engine.stop()
+            except Exception as e:
+                logger.debug("Synthesizer stop engine: %s", e)
+            self._engine = None
+        self._elevenlabs_client = None
+        self._initialized = False
     
     def is_available(self) -> bool:
         """Verifica se síntese está disponível"""

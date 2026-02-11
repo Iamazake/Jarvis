@@ -9,9 +9,13 @@ Versão: 3.0.0
 
 import asyncio
 import logging
+import os
 from typing import Optional, Callable, Dict, Any
 
 logger = logging.getLogger(__name__)
+
+# Desativa todo o módulo de voz (TTS/STT/Listener) para evitar COM/comtypes no shutdown (run_jarvis_message).
+JARVIS_DISABLE_VOICE = os.getenv('JARVIS_DISABLE_VOICE', '').strip().lower() in ('1', 'true', 'yes')
 
 
 class VoiceModule:
@@ -47,58 +51,55 @@ class VoiceModule:
         self.status = '🔴'
     
     async def start(self):
-        """Inicializa componentes de voz"""
+        """Inicializa componentes de voz. TTS é lazy (só no primeiro speak()) para evitar COM no run_jarvis_message."""
         logger.info("🎤 Iniciando módulo de voz...")
-        
+        if JARVIS_DISABLE_VOICE:
+            logger.info("  ⏭️ JARVIS_DISABLE_VOICE=1: módulo de voz desativado")
+            self._running = True
+            self.status = '🟢'
+            return
+
         try:
-            # Inicializa TTS (Text-to-Speech)
+            # Cria TTS mas NÃO chama initialize() aqui (lazy no primeiro speak()) para evitar pyttsx3/COM no shutdown
             from .synthesizer import Synthesizer
             self.synthesizer = Synthesizer(
                 speed=self.voice_speed,
                 language=self.language
             )
-            await self.synthesizer.initialize()
-            logger.info("  ✅ TTS inicializado")
-            
+            logger.info("  ✅ TTS (lazy) preparado")
         except Exception as e:
             logger.warning(f"  ⚠️ TTS: {e}")
-        
+
         try:
-            # Inicializa STT (Speech-to-Text)
             from .transcriber import Transcriber
             self.transcriber = Transcriber(
                 model=self.config.get('WHISPER_MODEL', 'base'),
-                language=self.language[:2]  # 'pt'
+                language=self.language[:2]
             )
             await self.transcriber.initialize()
             logger.info("  ✅ STT inicializado")
-            
         except Exception as e:
             logger.warning(f"  ⚠️ STT: {e}")
-        
+
         try:
-            # Inicializa Listener (captura de áudio)
             from .listener import AudioListener
-            self.listener = AudioListener(
-                wake_word=self.wake_word
-            )
+            self.listener = AudioListener(wake_word=self.wake_word)
             logger.info("  ✅ Listener inicializado")
-            
         except Exception as e:
             logger.warning(f"  ⚠️ Listener: {e}")
-        
+
         self._running = True
         self.status = '🟢'
         logger.info("✅ Módulo de voz pronto")
     
     async def stop(self):
-        """Para o módulo de voz"""
+        """Para o módulo de voz. Chama synthesizer.stop() para liberar COM/pyttsx3 e evitar travamento no __del__."""
         self._running = False
         self._listening = False
-        
+        if self.synthesizer and hasattr(self.synthesizer, 'stop'):
+            self.synthesizer.stop()
         if self.listener:
             self.listener.stop()
-        
         self.status = '🔴'
         logger.info("⏹️ Módulo de voz parado")
     

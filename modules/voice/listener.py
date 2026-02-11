@@ -188,7 +188,9 @@ class AudioListener:
             return False
     
     def stop(self):
-        """Para o listener"""
+        """Para o listener. Idempotente.
+        Nenhuma thread de background é criada neste listener; se no futuro houver,
+        deve ser daemon=True e fazer join(timeout) aqui."""
         self._running = False
         
         if self._stream:

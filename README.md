@@ -136,8 +136,39 @@ python3 main.py
 | GET | `/health` | Health check |
 | GET | `/stats` | Estatísticas |
 | POST | `/webhook` | Receber mensagens do WhatsApp |
+| POST | `/queue` | Enfileirar mensagem (autopilot) |
 | POST | `/process` | Processar mensagem via IA |
 | POST | `/send` | Enviar via WhatsApp (proxy) |
+
+## Autopilot, histórico e resumos
+
+### Habilitar autopilot
+- Pelo WhatsApp: diga **"autopilot para [nome do contato]"** ou **"quando [nome] mandar mensagem, responda"**. O JARVIS ativa a auto-resposta para esse contato por 2h (renovável ao receber mensagem).
+- **Grupos (@g.us):** autopilot **OFF por padrão** e **só o admin** pode ativar. Ex.: "ative autopilot para o grupo X" — se quem pedir não for o `JARVIS_ADMIN_JID`, a resposta será "Só o administrador pode ativar o autopilot em grupos."
+
+### Pedir resumo
+- **"resumo autopilot do [contato] hoje"** — resumo do dia.
+- **"resumo autopilot do [contato] 24h"** — últimas 24 horas.
+- **"resumo autopilot do [contato] 50 mensagens"** — últimas N mensagens (até 500).
+- **Privacidade:** só o **admin** pode pedir resumo de qualquer chat; um contato só pode pedir resumo do **próprio** chat. O requester é identificado pelo header `X-Jarvis-Requester-Jid` (não pelo body).
+
+### Migrations (MySQL)
+Para persistir histórico (`conversation_events`) e resumos (`autopilot_summaries`):
+
+```bash
+mysql -u root -p jarvis_db < jarvis/migrations/001_conversation_events.sql
+mysql -u root -p jarvis_db < jarvis/migrations/002_autopilot_summaries.sql
+```
+
+### .env (autopilot e API interna)
+- **MySQL:** `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE`.
+- **Admin (resumo de terceiros):** `JARVIS_ADMIN_JID=5511985751247@s.whatsapp.net` (seu número).
+- **Chamadas internas API ↔ WhatsApp:** `JARVIS_INTERNAL_SECRET` (valor compartilhado para headers `X-Jarvis-Internal`).
+- **Dados (context_state.json):** `JARVIS_DATA_DIR` opcional; padrão `data/` na raiz do projeto.
+
+### Testes
+- **API (Node):** `cd jarvis/services/api && node --test tests/autopilot-summary.test.js` (privacidade: requester via header, 403/200).
+- **Python (autopilot storage):** `cd jarvis && python tests/test_autopilot_storage.py`.
 
 ## 🔧 Configuração
 

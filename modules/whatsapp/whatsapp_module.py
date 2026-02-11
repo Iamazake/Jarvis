@@ -31,6 +31,10 @@ def _load_env():
     return os.getenv('WHATSAPP_API_URL', 'http://localhost:3001')
 
 
+def _jarvis_api_url():
+    return os.getenv('JARVIS_API_URL', 'http://127.0.0.1:5000').rstrip('/')
+
+
 class WhatsAppModule:
     """
     Módulo WhatsApp para o Orchestrator.
@@ -356,6 +360,15 @@ class WhatsAppModule:
                     f"❌ Não encontrei o contato '{contact}' para ativar o autopilot. Verifique o nome ou monitore o contato antes.",
                     {},
                 )
+            # Grupos (@g.us): só o admin pode ativar autopilot (enforcement).
+            if jid.strip().lower().endswith("@g.us"):
+                admin_jid = (os.getenv("JARVIS_ADMIN_JID") or "").strip().lower()
+                requester = ((metadata or {}).get("jid") or "").strip().lower()
+                if admin_jid and requester and requester != admin_jid:
+                    return (
+                        "Só o administrador pode ativar o autopilot em grupos. Você não tem permissão.",
+                        {},
+                    )
             return (
                 f"Autopilot ativado para **{display_name}** (tom {tone}) por 2 horas. Quando mandar mensagem, respondo automaticamente.",
                 {"enable_autopilot": {"jid": jid, "contact": display_name, "tone": tone}},
@@ -369,6 +382,46 @@ class WhatsAppModule:
                     {"disable_autopilot": {"contact": contact}},
                 )
             return "Para qual contato desativar o autopilot? Ex: pare de responder a Tchuchuca.", {}
+
+        if intent_type == 'whatsapp_autopilot_summary':
+            requester_jid = (metadata or {}).get('jid') or ''
+            contact = (entities.get('contact') or '').strip()
+            period = (entities.get('period') or '24h').strip().lower()
+            last_n = entities.get('last_n')
+            if contact and contact.lower() in ('eu', 'me', 'mim', 'meu chat'):
+                target_jid = requester_jid
+            elif contact:
+                jid, _, _ = await self._find_contact_with_meta(contact, context)
+                target_jid = jid or ''
+            else:
+                target_jid = requester_jid
+            if not requester_jid or not target_jid:
+                return "Não foi possível identificar o chat. Use: resumo autopilot do [contato] ou resumo autopilot (do seu próprio chat).", {}
+            api_url = _jarvis_api_url()
+            internal_secret = os.getenv('JARVIS_INTERNAL_SECRET', '')
+            body = {'target_jid': target_jid, 'period': period if period in ('hoje', '24h') else '24h'}
+            if last_n is not None and isinstance(last_n, (int, str)) and str(last_n).isdigit():
+                body['last_n'] = int(str(last_n))
+            headers = {'X-Jarvis-Requester-Jid': requester_jid}
+            if internal_secret:
+                headers['X-Jarvis-Internal'] = internal_secret
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        f"{api_url}/internal/autopilot-summary",
+                        json=body,
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=15)
+                    ) as resp:
+                        data = await resp.json() if resp.content_type == 'application/json' else {}
+                        if resp.status == 403:
+                            return data.get('message', 'Acesso negado: você só pode pedir resumo do seu próprio chat.'), {}
+                        if resp.status != 200:
+                            return data.get('message', f"Erro ao gerar resumo (HTTP {resp.status})."), {}
+                        return data.get('summary_md', '*Sem eventos no período.*'), {}
+            except Exception as e:
+                logger.exception("Erro ao chamar API resumo autopilot: %s", e)
+                return f"Não consegui gerar o resumo (serviço indisponível). {e}", {}
 
         if intent_type == 'whatsapp_autopilot_status':
             autopilot_list = context.get('autopilot_list') or []

@@ -8,6 +8,7 @@ Versão: 3.0.0
 """
 
 import asyncio
+import os
 import re
 import logging
 from typing import Dict, Any, Optional, List
@@ -41,6 +42,9 @@ class Orchestrator:
         
         # Registro de ações proativas agendadas
         self._scheduled_tasks: List[Dict] = []
+        
+        # Task do worker (cancelada explicitamente em stop())
+        self._worker_task: Optional[asyncio.Task] = None
     
     async def start(self):
         """Inicializa todos os módulos"""
@@ -50,14 +54,31 @@ class Orchestrator:
         # Carrega módulos disponíveis
         await self._load_modules()
         
-        # Inicia worker para processar fila
-        asyncio.create_task(self._task_worker())
+        # Inicia worker para processar fila; evita duplicata se start() chamado 2x
+        existing = getattr(self, '_worker_task', None)
+        if existing is not None and not existing.done():
+            logger.warning("Task worker já em execução, não criando outra")
+        else:
+            self._worker_task = asyncio.create_task(
+                self._task_worker(), name="orchestrator_task_worker"
+            )
         
         logger.info(f"✅ Orquestrador pronto - {len(self.modules)} módulos carregados")
     
     async def stop(self):
         """Para todos os módulos"""
         self._running = False
+        
+        # Cancelar e aguardar worker com timeout para evitar race com module.stop()
+        task = getattr(self, '_worker_task', None)
+        if task is not None:
+            task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+            except asyncio.CancelledError:
+                pass
+            except asyncio.TimeoutError:
+                logger.warning("Timeout aguardando _task_worker encerrar (2s)")
         
         for name, module in self.modules.items():
             try:
@@ -80,21 +101,18 @@ class Orchestrator:
             'memory': ('modules.memory', 'MemoryModule'),
         }
         
+        disable_voice = os.getenv('JARVIS_DISABLE_VOICE', '').strip().lower() in ('1', 'true', 'yes')
         for name, (module_path, class_name) in available_modules.items():
+            if name == 'voice' and disable_voice:
+                logger.info("  ⏭️  voice ignorado (JARVIS_DISABLE_VOICE=1)")
+                continue
             try:
-                # Tenta importar dinamicamente
                 module = __import__(module_path, fromlist=[class_name])
                 module_class = getattr(module, class_name)
-                
-                # Instancia o módulo
                 self.modules[name] = module_class(self.config)
-                
-                # Inicializa se tiver método start
                 if hasattr(self.modules[name], 'start'):
                     await self.modules[name].start()
-                
                 logger.info(f"  ✅ {name} carregado")
-                
             except ImportError:
                 logger.debug(f"  ⏭️  {name} não disponível")
             except Exception as e:
@@ -248,7 +266,7 @@ class Orchestrator:
         # Regra de ouro: confiança < 0.7 → confirmar, não executar (exceto conversa/cumprimentos/ajuda)
         # NUNCA pedir confirmação para conversation, greeting, thanks, farewell, help, system_info
         CONFIDENCE_THRESHOLD = 0.7
-        NO_CONFIRM_INTENTS = ('greeting', 'thanks', 'farewell', 'conversation', 'conversation_question', 'help', 'system_info', 'whatsapp_autoreply_enable', 'whatsapp_autoreply_disable', 'whatsapp_autopilot_status', 'whatsapp_autopilot_set_tone', 'whatsapp_monitor_status', 'whatsapp_monitor_disable')
+        NO_CONFIRM_INTENTS = ('greeting', 'thanks', 'farewell', 'conversation', 'conversation_question', 'help', 'system_info', 'weather', 'wiki', 'search', 'news', 'whatsapp_autoreply_enable', 'whatsapp_autoreply_disable', 'whatsapp_autopilot_status', 'whatsapp_autopilot_set_tone', 'whatsapp_monitor_status', 'whatsapp_monitor_disable')
         if intent.confidence < CONFIDENCE_THRESHOLD and intent.type not in NO_CONFIRM_INTENTS:
             desc = self._intent_description_for_confirm(intent.type)
             return (
@@ -638,6 +656,7 @@ class Orchestrator:
         try:
             ai_module = self.modules.get('ai')
             if not ai_module or not hasattr(ai_module, 'process'):
+                logger.debug("no_response: _compose_message_via_ai reason=no_ai_module")
                 return None
             result = await ai_module.process(
                 message=base,
@@ -649,9 +668,13 @@ class Orchestrator:
                 text = result[0]
             else:
                 text = result
-            return (text or "").strip()[:2000] or None
+            composed = (text or "").strip()[:2000] or None
+            if composed is None:
+                logger.debug("no_response: _compose_message_via_ai reason=empty_text")
+            return composed
         except Exception as e:
             logger.warning("Falha ao gerar mensagem com IA: %s", e)
+            logger.debug("no_response: _compose_message_via_ai reason=exception")
             return None
 
     async def _route_to_module(
@@ -667,6 +690,7 @@ class Orchestrator:
             'whatsapp_autoreply_enable': 'whatsapp',
             'whatsapp_autoreply_disable': 'whatsapp',
             'whatsapp_autopilot_status': 'whatsapp',
+            'whatsapp_autopilot_summary': 'whatsapp',
             'whatsapp_autopilot_set_tone': 'whatsapp',
             'whatsapp_monitor_status': 'whatsapp',
             'whatsapp_monitor_disable': 'whatsapp',
@@ -718,16 +742,22 @@ class Orchestrator:
         try:
             out_meta = {}
             if hasattr(module, 'process'):
+                req_meta = {**(metadata or {}), 'source': source}
                 result = await module.process(
                     message=message,
                     intent=intent,
                     context=context,
-                    metadata=metadata
+                    metadata=req_meta
                 )
                 if isinstance(result, tuple) and len(result) >= 2:
                     response, out_meta = result[0], (result[1] or {})
                 else:
                     response = result
+                if response is None:
+                    logger.debug(
+                        "no_response: _route_to_module module_returned_none module=%s intent=%s",
+                        module_name, intent.type,
+                    )
             elif hasattr(module, 'generate'):
                 profile = metadata.get('profile', {})
                 response, _ = module.generate(

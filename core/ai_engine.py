@@ -74,7 +74,7 @@ class JarvisAI:
         """Define o cliente MCP"""
         self.mcp_client = mcp_client
     
-    async def process(self, message: str, user_id: str = "default") -> AIResponse:
+    async def process(self, message: str, user_id: str = "default", metadata: Optional[Dict] = None) -> AIResponse:
         """
         Processa uma mensagem e retorna resposta
         
@@ -93,8 +93,9 @@ class JarvisAI:
             )
         
         try:
+            source = (metadata or {}).get('source', 'cli')
             # Monta mensagens
-            messages = self._build_messages(message)
+            messages = self._build_messages(message, source=source)
             
             # Pega ferramentas MCP
             tools = []
@@ -129,12 +130,12 @@ class JarvisAI:
                 error=str(e)
             )
     
-    def _build_messages(self, message: str) -> List[Dict]:
+    def _build_messages(self, message: str, source: str = 'cli') -> List[Dict]:
         """Constrói lista de mensagens para a API"""
         messages = []
         
-        # System prompt
-        system_prompt = self._get_system_prompt()
+        # System prompt (WhatsApp usa prompt específico)
+        system_prompt = self._get_system_prompt(source=source)
         messages.append({
             "role": "system",
             "content": system_prompt
@@ -153,8 +154,15 @@ class JarvisAI:
         
         return messages
     
-    def _get_system_prompt(self) -> str:
-        """Retorna o system prompt"""
+    def _get_system_prompt(self, source: str = 'cli') -> str:
+        """Retorna o system prompt. Para source=whatsapp usa prompt específico (UX + regras de ouro)."""
+        if source == 'whatsapp':
+            prompt_path = Path(__file__).resolve().parent.parent / 'config' / 'jarvis_system_prompt_whatsapp.txt'
+            if prompt_path.exists():
+                try:
+                    return prompt_path.read_text(encoding='utf-8').strip()
+                except Exception as e:
+                    logger.warning("Não foi possível carregar prompt WhatsApp: %s", e)
         if self.mcp_client:
             return self.mcp_client.get_system_prompt()
         
